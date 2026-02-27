@@ -7,10 +7,10 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class TextParser {
-    private static final Pattern EUR_PATTERN = Pattern.compile("(?i)(?:€\s*|\b)(\d+[\d.,]*)\s*€");
-    private static final Pattern EUR_PATTERN_ALT = Pattern.compile("(?i)€\s*(\d+[\d.,]*)");
-    private static final Pattern RSD_PATTERN = Pattern.compile("(?i)(?:=|rsd|din|дин)\s*(\d+[\d.,]*)");
-    private static final Pattern SIZE_PATTERN = Pattern.compile("(?i)(?:vel|veli[čc]ina|size)\s*[-:]?\s*([^\n]+)");
+    private static final Pattern EUR_PATTERN = Pattern.compile("(?i)(?:€\\s*|\\b)(\\d+[\\d.,]*)\\s*€");
+    private static final Pattern EUR_PATTERN_ALT = Pattern.compile("(?i)€\\s*(\\d+[\\d.,]*)");
+    private static final Pattern RSD_PATTERN = Pattern.compile("(?i)(?:=|rsd|din|дин)\\s*(\\d+[\\d.,]*)");
+    private static final Pattern SIZE_PATTERN = Pattern.compile("(?i)(?:vel|veli[čc]ina|size)\\s*[-:]?\\s*([^\\n]+)");
 
     private static final List<String> MALE_HINTS = Arrays.asList("muški", "muski", "muško", "musko", "men", "male");
     private static final List<String> FEMALE_HINTS = Arrays.asList("ženski", "zenski", "žensko", "zensko", "women", "female");
@@ -95,10 +95,10 @@ public class TextParser {
 
     private static String normalizeNumber(String raw) {
         String cleaned = raw.replaceAll("[^0-9.,]", "");
-        if (cleaned.matches("\\\\d{1,3}(\\\\.\\\\d{3})+")) {
+        if (cleaned.matches("\\d{1,3}(\\.\\d{3})+")) {
             return cleaned.replace(".", "");
         }
-        if (cleaned.matches("\\\\d{1,3}(,\\\\d{3})+")) {
+        if (cleaned.matches("\\d{1,3}(,\\d{3})+")) {
             return cleaned.replace(",", "");
         }
         if (cleaned.contains(",") && cleaned.contains(".")) {

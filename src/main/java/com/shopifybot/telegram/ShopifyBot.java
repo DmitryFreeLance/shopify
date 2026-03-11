@@ -382,11 +382,6 @@ public class ShopifyBot extends TelegramLongPollingBot {
         base = TextParser.normalizeNewlines(base);
         base = TextParser.removeLinesStartingWith(base, java.util.List.of("ako"));
         base = TextParser.normalizeSaleLines(base);
-        boolean hasSnizenje = TextParser.containsSnizenje(base);
-        if (hasSnizenje) {
-            base = highlightSnizenjeWord(base);
-            base = highlightNumbers(base);
-        }
         return base.replace("\n", "<br>");
     }
 

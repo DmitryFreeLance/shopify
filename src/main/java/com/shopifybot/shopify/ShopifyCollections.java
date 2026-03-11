@@ -71,4 +71,8 @@ public class ShopifyCollections {
         return items;
     }
 
+    public List<String> listSectionTitles() {
+        return Collections.unmodifiableList(sections);
+    }
+
 }

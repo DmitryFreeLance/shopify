@@ -27,8 +27,10 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -557,12 +559,43 @@ public class ShopifyBot extends TelegramLongPollingBot {
             shopify.updateProduct(productId, snap.variantId, title, bodyHtml, priceSelection.price, size);
             log.info("Product {} updated from edited message {}", productId, messageId);
 
-            if (TextParser.startsWithSaleHeader(text)) {
-                Long saleId = collections.getCollectionId("Sniženje");
-                if (saleId != null) {
-                    shopify.addProductToCollection(productId, saleId);
-                    log.info("Product {} added to Sniženje collection (edit)", productId);
+            try {
+                boolean saleHeader = TextParser.startsWithSaleHeader(text);
+                CategorySelection explicit = TextParser.detectExplicitCategories(text);
+                if (saleHeader) {
+                    ensureSaleCategory(explicit);
                 }
+                String explicitHint = explicit.entries.isEmpty() ? "" : explicit.entries.get(0).section;
+                boolean needsAi = explicit.entries.isEmpty() || hasOnlySaleCategory(explicit);
+                Classification ai = needsAi ? classifyWithFallback(text, List.of(), explicitHint) : new Classification();
+                CategorySelection resolved = resolveCategories(explicit, ai);
+
+                Set<String> desiredSections = new LinkedHashSet<>();
+                for (CategorySelection.Entry entry : resolved.entries) {
+                    for (String titleKey : collections.buildCollectionTitles(entry.section, entry.subcategory)) {
+                        desiredSections.add(titleKey);
+                    }
+                }
+
+                for (String section : collections.listSectionTitles()) {
+                    Long id = collections.getCollectionId(section);
+                    if (id == null) continue;
+                    if (desiredSections.contains(section)) {
+                        try {
+                            shopify.addProductToCollection(productId, id);
+                        } catch (Exception e) {
+                            log.warn("Failed to add product {} to collection {} (edit)", productId, section, e);
+                        }
+                    } else {
+                        try {
+                            shopify.removeProductFromCollection(id, productId);
+                        } catch (Exception e) {
+                            log.warn("Failed to remove product {} from collection {} (edit)", productId, section, e);
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("Failed to recalc collections for edited message {}", messageId, e);
             }
             return true;
         } catch (Exception e) {

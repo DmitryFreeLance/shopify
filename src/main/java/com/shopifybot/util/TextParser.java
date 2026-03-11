@@ -15,7 +15,8 @@ public class TextParser {
     private static final Pattern CENA_PATTERN = Pattern.compile("(?iu)\\b(cena|цена)\\b\\s*[-:]*\\s*(\\d+[\\d.,]*)\\s*(rsd|din|дин|eur|€)?");
     private static final Pattern SIZE_PATTERN = Pattern.compile("(?i)(?:vel|veli[čc]ina|size)\\s*[-:]?\\s*([^\\n]+)");
     private static final Pattern DISCOUNT_PATTERN = Pattern.compile("(?i)(\\d+[\\d.,]*)\\s*[-–]\\s*(\\d{1,2})\\s*%\\s*=\\s*(\\d+[\\d.,]*)");
-    private static final Pattern DISCOUNT_FRAGMENT_PATTERN = Pattern.compile("(?iu)^[\\d\\s.,%\\-–=€]+$");
+    private static final Pattern DISCOUNT_FRAGMENT_PATTERN = Pattern.compile("(?iu)^[\\d\\s.,%\\-–—−=€:]+$");
+    private static final Pattern SALE_WORD_PATTERN = Pattern.compile("(?iu)\\b(sniženje|snizenje|снижение)\\b");
 
     private static final List<String> MALE_HINTS = Arrays.asList("muški", "muski", "muško", "musko", "men", "male");
     private static final List<String> FEMALE_HINTS = Arrays.asList("ženski", "zenski", "žensko", "zensko", "women", "female");
@@ -246,8 +247,7 @@ public class TextParser {
             String line = lines[i];
             String trimmed = line.trim();
             if (trimmed.isEmpty()) continue;
-            String lower = trimmed.toLowerCase(Locale.ROOT);
-            if (startsWithSaleHeaderLine(lower)) {
+            if (isSaleHeaderLine(trimmed)) {
                 StringBuilder sale = new StringBuilder(trimmed);
                 int j = i + 1;
                 while (j < lines.length) {
@@ -273,6 +273,11 @@ public class TextParser {
             sb.append(trimmed);
         }
         return sb.toString();
+    }
+
+    private static boolean isSaleHeaderLine(String value) {
+        if (value == null || value.isBlank()) return false;
+        return SALE_WORD_PATTERN.matcher(value).find();
     }
 
     private static boolean isDiscountFragment(String value) {

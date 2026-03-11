@@ -278,15 +278,22 @@ public class TextParser {
 
     public static String normalizeNewlines(String text) {
         if (text == null) return null;
-        String normalized = text.replace("\r\n", "\n");
-        normalized = normalized.replace('\r', '\n');
+        String normalized = text.replaceAll("\\R", "\n");
+        // Strip invisible format chars that can break regex matches (e.g., ZWJ/ZWNJ).
+        normalized = normalized.replaceAll("\\p{Cf}", "");
         return normalized;
     }
 
     private static boolean containsSaleWord(String value) {
         if (value == null || value.isBlank()) return false;
-        String normalized = Normalizer.normalize(value, Normalizer.Form.NFKC).toLowerCase(Locale.ROOT);
-        return normalized.contains("sniženje") || normalized.contains("snizenje") || normalized.contains("снижение");
+        String latin = Normalizer.normalize(value, Normalizer.Form.NFKD);
+        latin = latin.replaceAll("\\p{M}", "");
+        latin = latin.replaceAll("[^\\p{L}]", "").toLowerCase(Locale.ROOT);
+        if (latin.contains("snizenje")) {
+            return true;
+        }
+        String cyr = value.toLowerCase(Locale.ROOT).replaceAll("[^\\p{IsCyrillic}]", "");
+        return cyr.contains("снижение");
     }
 
     private static boolean isDiscountFragment(String value) {

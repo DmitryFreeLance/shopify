@@ -425,12 +425,13 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
         String[] lines = text.split("\n");
         String keywordLower = keyword.toLowerCase(Locale.ROOT);
+        String spanStart = "<span style=\"color:red;display:inline\">";
         StringBuilder sb = new StringBuilder();
         for (String line : lines) {
             String current = line;
             String lowerLine = line.toLowerCase(Locale.ROOT);
             if (lowerLine.contains(keywordLower) && !lowerLine.contains("<span") && !lowerLine.contains("</span>")) {
-                current = "<span style=\"color:red\">" + line + "</span>";
+                current = spanStart + line + "</span>";
             }
             if (sb.length() > 0) sb.append("\n");
             sb.append(current);
@@ -443,9 +444,10 @@ public class ShopifyBot extends TelegramLongPollingBot {
         Pattern pattern = Pattern.compile("(?iu)\\b(sniženje|snizenje|снижение)\\b");
         Matcher matcher = pattern.matcher(text);
         StringBuffer sb = new StringBuffer();
+        String spanStart = "<span style=\"color:red;display:inline\">";
         while (matcher.find()) {
             String match = matcher.group(1);
-            String replacement = "<span style=\"color:red\">" + match + "</span>";
+            String replacement = spanStart + match + "</span>";
             matcher.appendReplacement(sb, Matcher.quoteReplacement(replacement));
         }
         matcher.appendTail(sb);
@@ -457,9 +459,10 @@ public class ShopifyBot extends TelegramLongPollingBot {
         Pattern pattern = Pattern.compile("(?u)(\\d[\\d.,]*)");
         Matcher matcher = pattern.matcher(text);
         StringBuffer sb = new StringBuffer();
+        String spanStart = "<span style=\"color:red;display:inline\">";
         while (matcher.find()) {
             String match = matcher.group(1);
-            String replacement = "<span style=\"color:red\">" + match + "</span>";
+            String replacement = spanStart + match + "</span>";
             matcher.appendReplacement(sb, Matcher.quoteReplacement(replacement));
         }
         matcher.appendTail(sb);

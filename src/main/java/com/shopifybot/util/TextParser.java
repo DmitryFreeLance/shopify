@@ -2,6 +2,7 @@ package com.shopifybot.util;
 
 import com.shopifybot.ai.CategorySelection;
 
+import java.text.Normalizer;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -16,7 +17,6 @@ public class TextParser {
     private static final Pattern SIZE_PATTERN = Pattern.compile("(?i)(?:vel|veli[čc]ina|size)\\s*[-:]?\\s*([^\\n]+)");
     private static final Pattern DISCOUNT_PATTERN = Pattern.compile("(?i)(\\d+[\\d.,]*)\\s*[-–]\\s*(\\d{1,2})\\s*%\\s*=\\s*(\\d+[\\d.,]*)");
     private static final Pattern DISCOUNT_FRAGMENT_PATTERN = Pattern.compile("(?iu)^[\\d\\s.,%\\-–—−=€:]+$");
-    private static final Pattern SALE_WORD_PATTERN = Pattern.compile("(?iu)\\b(sniženje|snizenje|снижение)\\b");
 
     private static final List<String> MALE_HINTS = Arrays.asList("muški", "muski", "muško", "musko", "men", "male");
     private static final List<String> FEMALE_HINTS = Arrays.asList("ženski", "zenski", "žensko", "zensko", "women", "female");
@@ -241,13 +241,14 @@ public class TextParser {
 
     public static String normalizeSaleLines(String text) {
         if (text == null || text.isBlank()) return text;
-        String[] lines = text.split("\\n");
+        String normalized = normalizeNewlines(text);
+        String[] lines = normalized.split("\\n");
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < lines.length; i++) {
             String line = lines[i];
             String trimmed = line.trim();
             if (trimmed.isEmpty()) continue;
-            if (isSaleHeaderLine(trimmed)) {
+            if (containsSaleWord(trimmed)) {
                 StringBuilder sale = new StringBuilder(trimmed);
                 int j = i + 1;
                 while (j < lines.length) {
@@ -275,16 +276,26 @@ public class TextParser {
         return sb.toString();
     }
 
-    private static boolean isSaleHeaderLine(String value) {
+    public static String normalizeNewlines(String text) {
+        if (text == null) return null;
+        String normalized = text.replace("\r\n", "\n");
+        normalized = normalized.replace('\r', '\n');
+        return normalized;
+    }
+
+    private static boolean containsSaleWord(String value) {
         if (value == null || value.isBlank()) return false;
-        return SALE_WORD_PATTERN.matcher(value).find();
+        String normalized = Normalizer.normalize(value, Normalizer.Form.NFKC).toLowerCase(Locale.ROOT);
+        return normalized.contains("sniženje") || normalized.contains("snizenje") || normalized.contains("снижение");
     }
 
     private static boolean isDiscountFragment(String value) {
         if (value == null || value.isBlank()) return false;
         String trimmed = value.trim();
         String lower = trimmed.toLowerCase(Locale.ROOT);
-        if (lower.equals("rsd") || lower.equals("din") || lower.equals("дин") || lower.equals("eur") || lower.equals("€")) {
+        if (lower.equals("€")) return true;
+        String letters = trimmed.replaceAll("[^\\p{L}]", "").toLowerCase(Locale.ROOT);
+        if (letters.equals("rsd") || letters.equals("din") || letters.equals("дин") || letters.equals("eur")) {
             return true;
         }
         return DISCOUNT_FRAGMENT_PATTERN.matcher(trimmed).matches();

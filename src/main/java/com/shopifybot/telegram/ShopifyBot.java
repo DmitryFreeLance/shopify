@@ -379,6 +379,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private String buildDescription(String originalText, String aiDescription, PriceSelection priceSelection, TextParser.DiscountInfo discount) {
         String base = (originalText != null && !originalText.isBlank()) ? originalText : aiDescription;
         if (base == null) base = "";
+        base = TextParser.normalizeNewlines(base);
         base = TextParser.removeLinesStartingWith(base, java.util.List.of("ako"));
         base = TextParser.normalizeSaleLines(base);
         boolean hasSnizenje = TextParser.containsSnizenje(base);

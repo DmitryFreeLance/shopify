@@ -44,8 +44,18 @@ public class Database {
                     ")");
             stmt.executeUpdate("CREATE TABLE IF NOT EXISTS collections (" +
                     "title TEXT PRIMARY KEY," +
-                    "collection_id INTEGER NOT NULL" +
+                    "collection_id INTEGER NOT NULL," +
+                    "handle TEXT" +
                     ")");
+            stmt.executeUpdate("CREATE TABLE IF NOT EXISTS meta (" +
+                    "key TEXT PRIMARY KEY," +
+                    "value TEXT NOT NULL" +
+                    ")");
+            try {
+                stmt.executeUpdate("ALTER TABLE collections ADD COLUMN handle TEXT");
+            } catch (SQLException ignored) {
+                // Column already exists.
+            }
         } catch (SQLException e) {
             throw new RuntimeException("DB init failed", e);
         }
@@ -146,6 +156,30 @@ public class Database {
         }
     }
 
+    public void clearProductForMessage(String channelId, long messageId) {
+        String sql = "UPDATE posts SET product_id=NULL, status=? WHERE channel_id=? AND message_id=?";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, "NEW");
+            ps.setString(2, channelId);
+            ps.setLong(3, messageId);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("DB clearProductForMessage failed", e);
+        }
+    }
+
+    public void clearProductForMediaGroup(String channelId, String mediaGroupId) {
+        String sql = "UPDATE posts SET product_id=NULL, status=? WHERE channel_id=? AND media_group_id=?";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, "NEW");
+            ps.setString(2, channelId);
+            ps.setString(3, mediaGroupId);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("DB clearProductForMediaGroup failed", e);
+        }
+    }
+
     public Long findProductId(String channelId, long messageId) {
         String sql = "SELECT product_id FROM posts WHERE channel_id=? AND message_id=?";
         try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -159,6 +193,22 @@ public class Database {
             }
         } catch (SQLException e) {
             throw new RuntimeException("DB findProductId failed", e);
+        }
+        return null;
+    }
+
+    public Long findProductIdForMediaGroup(String mediaGroupId) {
+        String sql = "SELECT product_id FROM posts WHERE media_group_id=? AND product_id IS NOT NULL LIMIT 1";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, mediaGroupId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    long val = rs.getLong(1);
+                    return rs.wasNull() ? null : val;
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("DB findProductIdForMediaGroup failed", e);
         }
         return null;
     }
@@ -238,9 +288,30 @@ public class Database {
         }
     }
 
+    public boolean markMediaGroupProcessing(String mediaGroupId) {
+        String sql = "UPDATE media_groups SET processed=2 WHERE media_group_id=? AND processed=0";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, mediaGroupId);
+            return ps.executeUpdate() > 0;
+        } catch (SQLException e) {
+            throw new RuntimeException("DB markMediaGroupProcessing failed", e);
+        }
+    }
+
+    public void markMediaGroupUnprocessed(String mediaGroupId) {
+        String sql = "UPDATE media_groups SET processed=0 WHERE media_group_id=?";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, mediaGroupId);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("DB markMediaGroupUnprocessed failed", e);
+        }
+    }
+
     public List<MediaItem> listMediaItems(String mediaGroupId) {
         List<MediaItem> items = new ArrayList<>();
-        String sql = "SELECT message_id, file_id, file_unique_id, file_size, width, height FROM media_items WHERE media_group_id=?";
+        String sql = "SELECT message_id, file_id, file_unique_id, file_size, width, height " +
+                "FROM media_items WHERE media_group_id=? ORDER BY message_id ASC";
         try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, mediaGroupId);
             try (ResultSet rs = ps.executeQuery()) {
@@ -308,14 +379,47 @@ public class Database {
         return null;
     }
 
-    public void storeCollection(String title, long id) {
-        String sql = "INSERT OR REPLACE INTO collections(title, collection_id) VALUES(?,?)";
+    public void storeCollection(String title, long id, String handle) {
+        String sql = "INSERT OR REPLACE INTO collections(title, collection_id, handle) VALUES(?,?,?)";
         try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, title);
             ps.setLong(2, id);
+            ps.setString(3, handle);
             ps.executeUpdate();
         } catch (SQLException e) {
             throw new RuntimeException("DB storeCollection failed", e);
+        }
+    }
+
+    public void clearCollections() {
+        String sql = "DELETE FROM collections";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("DB clearCollections failed", e);
+        }
+    }
+
+    public boolean hasMetaKey(String key) {
+        String sql = "SELECT 1 FROM meta WHERE key=? LIMIT 1";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, key);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("DB hasMetaKey failed", e);
+        }
+    }
+
+    public void setMeta(String key, String value) {
+        String sql = "INSERT OR REPLACE INTO meta(key, value) VALUES(?,?)";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, key);
+            ps.setString(2, value);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("DB setMeta failed", e);
         }
     }
 
@@ -330,6 +434,21 @@ public class Database {
             }
         } catch (SQLException e) {
             throw new RuntimeException("DB findCollectionId failed", e);
+        }
+        return null;
+    }
+
+    public String findCollectionHandle(String title) {
+        String sql = "SELECT handle FROM collections WHERE title=?";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, title);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return rs.getString(1);
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("DB findCollectionHandle failed", e);
         }
         return null;
     }

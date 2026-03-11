@@ -10,11 +10,16 @@ public class TextParser {
     private static final Pattern EUR_PATTERN = Pattern.compile("(?i)(?:€\\s*|\\b)(\\d+[\\d.,]*)\\s*€");
     private static final Pattern EUR_PATTERN_ALT = Pattern.compile("(?i)€\\s*(\\d+[\\d.,]*)");
     private static final Pattern RSD_PATTERN = Pattern.compile("(?i)(?:=|rsd|din|дин)\\s*(\\d+[\\d.,]*)");
+    private static final Pattern RSD_PATTERN_BEFORE = Pattern.compile("(?i)(\\d+[\\d.,]*)\\s*(rsd|din|дин)");
+    private static final Pattern EUR_TEXT_PATTERN = Pattern.compile("(?i)(\\d+[\\d.,]*)\\s*eur");
+    private static final Pattern CENA_PATTERN = Pattern.compile("(?iu)\\b(cena|цена)\\b\\s*[-:]*\\s*(\\d+[\\d.,]*)\\s*(rsd|din|дин|eur|€)?");
     private static final Pattern SIZE_PATTERN = Pattern.compile("(?i)(?:vel|veli[čc]ina|size)\\s*[-:]?\\s*([^\\n]+)");
+    private static final Pattern DISCOUNT_PATTERN = Pattern.compile("(?i)(\\d+[\\d.,]*)\\s*[-–]\\s*(\\d{1,2})\\s*%\\s*=\\s*(\\d+[\\d.,]*)");
+    private static final Pattern DISCOUNT_FRAGMENT_PATTERN = Pattern.compile("(?iu)^[\\d\\s.,%\\-–=€]+$");
 
     private static final List<String> MALE_HINTS = Arrays.asList("muški", "muski", "muško", "musko", "men", "male");
     private static final List<String> FEMALE_HINTS = Arrays.asList("ženski", "zenski", "žensko", "zensko", "women", "female");
-    private static final List<String> CHILD_HINTS = Arrays.asList("dečija", "decija", "kids", "child", "deca", "djeca");
+    private static final List<String> CHILD_HINTS = Arrays.asList("dečija", "decija", "dečije", "decije", "kids", "child", "deca", "djeca");
     private static final List<String> SALE_HINTS = Arrays.asList("sniženje", "snizenje", "sale", "akcija", "popust", "discount");
 
     private static final Map<String, String> SUBCATEGORY_MAP = new LinkedHashMap<>();
@@ -51,12 +56,34 @@ public class TextParser {
         return false;
     }
 
+    public static boolean containsSaleKeyword(String text) {
+        return containsAnyKeyword(text, SALE_HINTS);
+    }
+
+    public static boolean containsSnizenje(String text) {
+        if (text == null) return false;
+        String lower = text.toLowerCase(Locale.ROOT);
+        return lower.contains("sniženje") || lower.contains("snizenje") || lower.contains("снижение");
+    }
+
     public static String extractTitle(String text) {
         if (text == null || text.isBlank()) return "";
         String[] lines = text.split("\n");
         StringBuilder sb = new StringBuilder();
         for (String line : lines) {
             String lower = line.toLowerCase(Locale.ROOT);
+            if (startsWithSaleHeaderLine(lower)) {
+                continue;
+            }
+            if (DISCOUNT_PATTERN.matcher(line).find()) {
+                continue;
+            }
+            if (EUR_PATTERN.matcher(line).find() || EUR_PATTERN_ALT.matcher(line).find() || EUR_TEXT_PATTERN.matcher(line).find()) {
+                continue;
+            }
+            if (RSD_PATTERN.matcher(line).find() || RSD_PATTERN_BEFORE.matcher(line).find()) {
+                continue;
+            }
             if (lower.contains("cena") || lower.contains("vel") || lower.contains("veli")) {
                 break;
             }
@@ -83,6 +110,8 @@ public class TextParser {
         if (m.find()) return normalizeNumber(m.group(1));
         m = EUR_PATTERN_ALT.matcher(text);
         if (m.find()) return normalizeNumber(m.group(1));
+        m = EUR_TEXT_PATTERN.matcher(text);
+        if (m.find()) return normalizeNumber(m.group(1));
         return "";
     }
 
@@ -90,7 +119,47 @@ public class TextParser {
         if (text == null) return "";
         Matcher m = RSD_PATTERN.matcher(text);
         if (m.find()) return normalizeNumber(m.group(1));
+        m = RSD_PATTERN_BEFORE.matcher(text);
+        if (m.find()) return normalizeNumber(m.group(1));
+        m = CENA_PATTERN.matcher(text);
+        if (m.find()) {
+            String currency = m.group(3);
+            if (currency == null || currency.isBlank()) {
+                return normalizeNumber(m.group(2));
+            }
+            String lower = currency.toLowerCase(Locale.ROOT);
+            if (lower.contains("rsd") || lower.contains("din") || lower.contains("дин")) {
+                return normalizeNumber(m.group(2));
+            }
+        }
         return "";
+    }
+
+    public static DiscountInfo extractDiscount(String text) {
+        if (text == null) return null;
+        Matcher m = DISCOUNT_PATTERN.matcher(text);
+        if (!m.find()) return null;
+        String original = normalizeNumber(m.group(1));
+        String percent = m.group(2);
+        String finalPrice = normalizeNumber(m.group(3));
+        if (finalPrice == null || finalPrice.isBlank()) return null;
+        return new DiscountInfo(original, percent, finalPrice);
+    }
+
+    public static boolean startsWithSaleHeader(String text) {
+        if (text == null || text.isBlank()) return false;
+        String[] lines = text.split("\\n");
+        for (String line : lines) {
+            String trimmed = line.trim();
+            if (trimmed.isEmpty()) continue;
+            String lower = trimmed.toLowerCase(Locale.ROOT);
+            return startsWithSaleHeaderLine(lower);
+        }
+        return false;
+    }
+
+    private static boolean startsWithSaleHeaderLine(String lowerLine) {
+        return lowerLine.startsWith("sniženje") || lowerLine.startsWith("snizenje");
     }
 
     private static String normalizeNumber(String raw) {
@@ -118,28 +187,16 @@ public class TextParser {
 
         boolean male = containsAny(lower, MALE_HINTS) || lower.contains("mušk") || lower.contains("musko");
         boolean female = containsAny(lower, FEMALE_HINTS) || lower.contains("žensk") || lower.contains("zensko");
-        boolean child = containsAny(lower, CHILD_HINTS);
         boolean sale = containsAny(lower, SALE_HINTS);
 
         CategorySelection selection = new CategorySelection();
 
-        if (child) selection.add("Dečija kolekcija", null);
         if (sale) selection.add("Sniženje", null);
         if (male) selection.add("Muško", null);
         if (female) selection.add("Žensko", null);
 
         String sub = detectSubcategory(lower);
-        if (sub != null) {
-            if (selection.entries.isEmpty()) {
-                selection.add("Muško", sub);
-            } else {
-                selection.entries.forEach(e -> {
-                    if ("Muško".equals(e.section) || "Žensko".equals(e.section)) {
-                        e.subcategory = sub;
-                    }
-                });
-            }
-        }
+        // Subcategories are not used in the current catalog.
         return selection;
     }
 
@@ -157,5 +214,86 @@ public class TextParser {
             if (lower.contains(keyword)) return true;
         }
         return false;
+    }
+
+    public static String removeLinesStartingWith(String text, List<String> prefixes) {
+        if (text == null || text.isBlank()) return text;
+        String[] lines = text.split("\\n");
+        StringBuilder sb = new StringBuilder();
+        for (String line : lines) {
+            String trimmed = line.trim();
+            if (trimmed.isEmpty()) continue;
+            String lower = trimmed.toLowerCase(Locale.ROOT);
+            boolean skip = false;
+            for (String prefix : prefixes) {
+                if (lower.startsWith(prefix.toLowerCase(Locale.ROOT))) {
+                    skip = true;
+                    break;
+                }
+            }
+            if (skip) continue;
+            if (sb.length() > 0) sb.append("\n");
+            sb.append(trimmed);
+        }
+        return sb.toString();
+    }
+
+    public static String normalizeSaleLines(String text) {
+        if (text == null || text.isBlank()) return text;
+        String[] lines = text.split("\\n");
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < lines.length; i++) {
+            String line = lines[i];
+            String trimmed = line.trim();
+            if (trimmed.isEmpty()) continue;
+            String lower = trimmed.toLowerCase(Locale.ROOT);
+            if (startsWithSaleHeaderLine(lower)) {
+                StringBuilder sale = new StringBuilder(trimmed);
+                int j = i + 1;
+                while (j < lines.length) {
+                    String nextTrimmed = lines[j].trim();
+                    if (nextTrimmed.isEmpty()) {
+                        j++;
+                        continue;
+                    }
+                    if (isDiscountFragment(nextTrimmed) || DISCOUNT_PATTERN.matcher(nextTrimmed).find()) {
+                        sale.append(" ").append(nextTrimmed);
+                        j++;
+                        continue;
+                    }
+                    break;
+                }
+                String compact = sale.toString().replaceAll("\\s+", " ").trim();
+                if (sb.length() > 0) sb.append("\n");
+                sb.append(compact);
+                i = j - 1;
+                continue;
+            }
+            if (sb.length() > 0) sb.append("\n");
+            sb.append(trimmed);
+        }
+        return sb.toString();
+    }
+
+    private static boolean isDiscountFragment(String value) {
+        if (value == null || value.isBlank()) return false;
+        String trimmed = value.trim();
+        String lower = trimmed.toLowerCase(Locale.ROOT);
+        if (lower.equals("rsd") || lower.equals("din") || lower.equals("дин") || lower.equals("eur") || lower.equals("€")) {
+            return true;
+        }
+        return DISCOUNT_FRAGMENT_PATTERN.matcher(trimmed).matches();
+    }
+
+    public static class DiscountInfo {
+        public final String original;
+        public final String percent;
+        public final String finalPrice;
+
+        public DiscountInfo(String original, String percent, String finalPrice) {
+            this.original = original;
+            this.percent = percent;
+            this.finalPrice = finalPrice;
+        }
     }
 }

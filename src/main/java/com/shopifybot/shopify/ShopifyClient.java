@@ -21,13 +21,13 @@ public class ShopifyClient {
     private final ObjectMapper mapper = new ObjectMapper();
     private final String shopDomain;
     private final String apiVersion;
-    private final String adminToken;
+    private final TokenProvider tokenProvider;
 
-    public ShopifyClient(OkHttpClient http, String shopDomain, String apiVersion, String adminToken) {
+    public ShopifyClient(OkHttpClient http, String shopDomain, String apiVersion, TokenProvider tokenProvider) {
         this.http = http;
         this.shopDomain = shopDomain;
         this.apiVersion = apiVersion;
-        this.adminToken = adminToken;
+        this.tokenProvider = tokenProvider;
     }
 
     public List<CustomCollection> listAllCustomCollections() throws IOException {
@@ -42,7 +42,8 @@ public class ShopifyClient {
             for (JsonNode node : arr) {
                 long id = node.path("id").asLong();
                 String title = node.path("title").asText();
-                all.add(new CustomCollection(id, title));
+                String handle = node.path("handle").asText();
+                all.add(new CustomCollection(id, title, handle));
                 if (id > maxId) maxId = id;
             }
             if (arr.size() < 250) break;
@@ -59,7 +60,11 @@ public class ShopifyClient {
 
         JsonNode response = post(restBase() + "/custom_collections.json", root);
         JsonNode created = response.path("custom_collection");
-        return new CustomCollection(created.path("id").asLong(), created.path("title").asText());
+        return new CustomCollection(
+                created.path("id").asLong(),
+                created.path("title").asText(),
+                created.path("handle").asText()
+        );
     }
 
     public long createProduct(ProductPayload payload) throws IOException {
@@ -115,7 +120,7 @@ public class ShopifyClient {
     public void deleteProduct(long productId) throws IOException {
         Request request = new Request.Builder()
                 .url(restBase() + "/products/" + productId + ".json")
-                .addHeader("X-Shopify-Access-Token", adminToken)
+                .addHeader("X-Shopify-Access-Token", tokenProvider.getToken())
                 .delete()
                 .build();
         try (Response response = http.newCall(request).execute()) {
@@ -125,10 +130,77 @@ public class ShopifyClient {
         }
     }
 
+    public void deleteCustomCollection(long collectionId) throws IOException {
+        Request request = new Request.Builder()
+                .url(restBase() + "/custom_collections/" + collectionId + ".json")
+                .addHeader("X-Shopify-Access-Token", tokenProvider.getToken())
+                .delete()
+                .build();
+        try (Response response = http.newCall(request).execute()) {
+            if (!response.isSuccessful()) {
+                throw new IOException("Shopify delete custom collection failed: " + response.code() + " " + response.message());
+            }
+        }
+    }
+
+    public String getShopCurrency() throws IOException {
+        JsonNode root = get(restBase() + "/shop.json");
+        return root.path("shop").path("currency").asText("");
+    }
+
+    public ShopifyProductSnapshot getProductSnapshot(long productId) throws IOException {
+        JsonNode root = get(restBase() + "/products/" + productId + ".json");
+        JsonNode product = root.path("product");
+        JsonNode variants = product.path("variants");
+        long variantId = 0;
+        if (variants.isArray() && variants.size() > 0) {
+            variantId = variants.get(0).path("id").asLong(0);
+        }
+        return new ShopifyProductSnapshot(
+                product.path("id").asLong(0),
+                variantId,
+                product.path("title").asText(""),
+                product.path("tags").asText(""),
+                product.path("product_type").asText("")
+        );
+    }
+
+    public void updateProduct(long productId, long variantId, String title, String bodyHtml, String price, String size) throws IOException {
+        ObjectNode root = mapper.createObjectNode();
+        ObjectNode product = root.putObject("product");
+        product.put("id", productId);
+        if (title != null && !title.isBlank()) {
+            product.put("title", title);
+        }
+        if (bodyHtml != null && !bodyHtml.isBlank()) {
+            product.put("body_html", bodyHtml);
+        }
+        ArrayNode variants = product.putArray("variants");
+        ObjectNode variant = variants.addObject();
+        if (variantId > 0) {
+            variant.put("id", variantId);
+        }
+        if (size != null && !size.isBlank()) {
+            variant.put("option1", size);
+        }
+        variant.put("price", price);
+
+        Request request = new Request.Builder()
+                .url(restBase() + "/products/" + productId + ".json")
+                .addHeader("X-Shopify-Access-Token", tokenProvider.getToken())
+                .put(RequestBody.create(mapper.writeValueAsBytes(root), JSON))
+                .build();
+        try (Response response = http.newCall(request).execute()) {
+            if (!response.isSuccessful()) {
+                throw new IOException("Shopify update failed: " + response.code() + " " + response.message());
+            }
+        }
+    }
+
     public boolean productExists(long productId) throws IOException {
         Request request = new Request.Builder()
                 .url(restBase() + "/products/" + productId + ".json")
-                .addHeader("X-Shopify-Access-Token", adminToken)
+                .addHeader("X-Shopify-Access-Token", tokenProvider.getToken())
                 .get()
                 .build();
         try (Response response = http.newCall(request).execute()) {
@@ -163,10 +235,67 @@ public class ShopifyClient {
         }
     }
 
+    public void removeProductFromCollection(long collectionId, long productId) throws IOException {
+        String mutation = "mutation Remove($id: ID!, $productIds: [ID!]!) { collectionRemoveProducts(id: $id, productIds: $productIds) { userErrors { field message } } }";
+        ObjectNode variables = mapper.createObjectNode();
+        variables.put("id", "gid://shopify/Collection/" + collectionId);
+        ArrayNode productIds = variables.putArray("productIds");
+        productIds.add("gid://shopify/Product/" + productId);
+        graphQL(mutation, variables);
+    }
+
+    public String findMenuIdByHandle(String handle) throws IOException {
+        String query = "{ menus(first: 50) { nodes { id handle title } } }";
+        JsonNode root = graphQL(query);
+        for (JsonNode node : root.path("data").path("menus").path("nodes")) {
+            if (handle.equalsIgnoreCase(node.path("handle").asText())) {
+                return node.path("id").asText();
+            }
+        }
+        return null;
+    }
+
+    public List<MenuSummary> listMenus() throws IOException {
+        String query = "{ menus(first: 50) { nodes { handle title } } }";
+        JsonNode root = graphQL(query);
+        List<MenuSummary> menus = new ArrayList<>();
+        for (JsonNode node : root.path("data").path("menus").path("nodes")) {
+            menus.add(new MenuSummary(node.path("handle").asText(), node.path("title").asText()));
+        }
+        return menus;
+    }
+
+    public void createOrUpdateMenu(String handle, String title, List<MenuItemInput> items) throws IOException {
+        String menuId = findMenuIdByHandle(handle);
+        ObjectNode variables = mapper.createObjectNode();
+        variables.put("handle", handle);
+        variables.put("title", title);
+        variables.set("items", buildMenuItems(items));
+
+        if (menuId == null || menuId.isBlank()) {
+            String mutation = "mutation Create($handle: String!, $title: String!, $items: [MenuItemCreateInput!]!) { menuCreate(handle: $handle, title: $title, items: $items) { menu { id handle title } userErrors { field message } } }";
+            graphQL(mutation, variables);
+        } else {
+            variables.put("id", menuId);
+            String mutation = "mutation Update($id: ID!, $handle: String!, $title: String!, $items: [MenuItemUpdateInput!]!) { menuUpdate(id: $id, handle: $handle, title: $title, items: $items) { menu { id handle title } userErrors { field message } } }";
+            graphQL(mutation, variables);
+        }
+    }
+
+    public Menu getMenuByHandle(String handle) throws IOException {
+        String query = "query Menu($handle: String!) { menu(handle: $handle) { id handle title items { title type url resourceId items { title type url resourceId items { title type url resourceId } } } } }";
+        ObjectNode vars = mapper.createObjectNode();
+        vars.put("handle", handle);
+        JsonNode root = graphQL(query, vars);
+        JsonNode menuNode = root.path("data").path("menu");
+        if (menuNode.isMissingNode() || menuNode.isNull()) return null;
+        return parseMenu(menuNode);
+    }
+
     private JsonNode get(String url) throws IOException {
         Request request = new Request.Builder()
                 .url(url)
-                .addHeader("X-Shopify-Access-Token", adminToken)
+                .addHeader("X-Shopify-Access-Token", tokenProvider.getToken())
                 .get()
                 .build();
         try (Response response = http.newCall(request).execute()) {
@@ -180,7 +309,7 @@ public class ShopifyClient {
     private JsonNode post(String url, ObjectNode body) throws IOException {
         Request request = new Request.Builder()
                 .url(url)
-                .addHeader("X-Shopify-Access-Token", adminToken)
+                .addHeader("X-Shopify-Access-Token", tokenProvider.getToken())
                 .post(RequestBody.create(mapper.writeValueAsBytes(body), JSON))
                 .build();
         try (Response response = http.newCall(request).execute()) {
@@ -203,7 +332,7 @@ public class ShopifyClient {
         }
         Request request = new Request.Builder()
                 .url(graphqlBase())
-                .addHeader("X-Shopify-Access-Token", adminToken)
+                .addHeader("X-Shopify-Access-Token", tokenProvider.getToken())
                 .post(RequestBody.create(mapper.writeValueAsBytes(root), JSON))
                 .build();
         try (Response response = http.newCall(request).execute()) {
@@ -214,6 +343,27 @@ public class ShopifyClient {
         }
     }
 
+    private ArrayNode buildMenuItems(List<MenuItemInput> items) {
+        ArrayNode array = mapper.createArrayNode();
+        for (MenuItemInput item : items) {
+            ObjectNode node = mapper.createObjectNode();
+            node.put("title", item.title);
+            node.put("type", item.type);
+            if ("HTTP".equalsIgnoreCase(item.type)) {
+                if (item.url != null && !item.url.isBlank()) {
+                    node.put("url", item.url);
+                }
+            } else if (item.resourceId != null && !item.resourceId.isBlank()) {
+                node.put("resourceId", item.resourceId);
+            }
+            if (!item.items.isEmpty()) {
+                node.set("items", buildMenuItems(item.items));
+            }
+            array.add(node);
+        }
+        return array;
+    }
+
     private String restBase() {
         return "https://" + shopDomain + "/admin/api/" + apiVersion;
     }
@@ -222,13 +372,37 @@ public class ShopifyClient {
         return "https://" + shopDomain + "/admin/api/" + apiVersion + "/graphql.json";
     }
 
+    private Menu parseMenu(JsonNode node) {
+        String id = node.path("id").asText();
+        String handle = node.path("handle").asText();
+        String title = node.path("title").asText();
+        List<MenuItem> items = parseMenuItems(node.path("items"));
+        return new Menu(id, handle, title, items);
+    }
+
+    private List<MenuItem> parseMenuItems(JsonNode itemsNode) {
+        List<MenuItem> items = new ArrayList<>();
+        if (itemsNode == null || !itemsNode.isArray()) return items;
+        for (JsonNode itemNode : itemsNode) {
+            String title = itemNode.path("title").asText();
+            String type = itemNode.path("type").asText();
+            String url = itemNode.path("url").asText();
+            String resourceId = itemNode.path("resourceId").asText();
+            List<MenuItem> children = parseMenuItems(itemNode.path("items"));
+            items.add(new MenuItem(title, type, url, resourceId, children));
+        }
+        return items;
+    }
+
     public static class CustomCollection {
         public final long id;
         public final String title;
+        public final String handle;
 
-        public CustomCollection(long id, String title) {
+        public CustomCollection(long id, String title, String handle) {
             this.id = id;
             this.title = title;
+            this.handle = handle;
         }
     }
 
@@ -241,5 +415,45 @@ public class ShopifyClient {
         public String size;
         public List<String> tags;
         public List<byte[]> images;
+    }
+
+    public static class Menu {
+        public final String id;
+        public final String handle;
+        public final String title;
+        public final List<MenuItem> items;
+
+        public Menu(String id, String handle, String title, List<MenuItem> items) {
+            this.id = id;
+            this.handle = handle;
+            this.title = title;
+            this.items = items;
+        }
+    }
+
+    public static class MenuItem {
+        public final String title;
+        public final String type;
+        public final String url;
+        public final String resourceId;
+        public final List<MenuItem> items;
+
+        public MenuItem(String title, String type, String url, String resourceId, List<MenuItem> items) {
+            this.title = title;
+            this.type = type;
+            this.url = url;
+            this.resourceId = resourceId;
+            this.items = items;
+        }
+    }
+
+    public static class MenuSummary {
+        public final String handle;
+        public final String title;
+
+        public MenuSummary(String handle, String title) {
+            this.handle = handle;
+            this.title = title;
+        }
     }
 }

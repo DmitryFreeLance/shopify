@@ -12,21 +12,7 @@ public class ShopifyCollections {
     private final List<String> sections = Arrays.asList(
             "Muško",
             "Žensko",
-            "Dečija kolekcija",
             "Sniženje"
-    );
-
-    private final List<String> subcategories = Arrays.asList(
-            "Jakne",
-            "Duksevi",
-            "Džemperi",
-            "Košulje",
-            "Majice",
-            "Farmerke",
-            "Pantalone",
-            "Donji deo trenerke",
-            "Gornji deo trenerke",
-            "Šorcevi"
     );
 
     public ShopifyCollections(ShopifyClient shopify, Database db) {
@@ -38,26 +24,12 @@ public class ShopifyCollections {
         Map<String, Long> existing = new HashMap<>();
         for (ShopifyClient.CustomCollection c : shopify.listAllCustomCollections()) {
             existing.put(c.title, c.id);
-            db.storeCollection(c.title, c.id);
+            db.storeCollection(c.title, c.id, c.handle);
         }
+    }
 
-        List<String> required = new ArrayList<>();
-        required.addAll(sections);
-        for (String section : Arrays.asList("Muško", "Žensko")) {
-            for (String sub : subcategories) {
-                if (section.equals("Žensko") && ("Donji deo trenerke".equals(sub) || "Gornji deo trenerke".equals(sub) || "Šorcevi".equals(sub))) {
-                    continue;
-                }
-                required.add(section + " / " + sub);
-            }
-        }
-
-        for (String title : required) {
-            if (!existing.containsKey(title)) {
-                ShopifyClient.CustomCollection created = shopify.createCustomCollection(title);
-                db.storeCollection(created.title, created.id);
-            }
-        }
+    public void ensureCatalogMenu() throws IOException {
+        // Intentionally no-op. Menu structure is managed manually.
     }
 
     public Long getCollectionId(String title) {
@@ -66,14 +38,37 @@ public class ShopifyCollections {
         return null;
     }
 
+    public String getCollectionHandle(String title) {
+        return db.findCollectionHandle(title);
+    }
+
     public List<String> buildCollectionTitles(String section, String subcategory) {
         List<String> titles = new ArrayList<>();
         if (section != null && !section.isBlank()) {
             titles.add(section);
-            if (subcategory != null && !subcategory.isBlank() && (section.equals("Muško") || section.equals("Žensko"))) {
-                titles.add(section + " / " + subcategory);
-            }
         }
         return titles;
     }
+
+    public List<Long> listAllCollectionIdsExcept(String excludeTitle) {
+        List<Long> ids = new ArrayList<>();
+        for (String title : sections) {
+            if (title.equals(excludeTitle) || title.startsWith(excludeTitle + " / ")) continue;
+            Long id = db.findCollectionId(title);
+            if (id != null) ids.add(id);
+        }
+        return ids;
+    }
+
+    private List<MenuItemInput> buildCatalogMenuItems() {
+        List<MenuItemInput> items = new ArrayList<>();
+        for (String section : sections) {
+            Long sectionId = getCollectionId(section);
+            if (sectionId == null) continue;
+            MenuItemInput sectionItem = MenuItemInput.collection(section, sectionId);
+            items.add(sectionItem);
+        }
+        return items;
+    }
+
 }

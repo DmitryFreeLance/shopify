@@ -13,11 +13,15 @@
 - `TELEGRAM_BOT_TOKEN`
 - `KIE_API_KEY`
 - `SHOPIFY_SHOP_DOMAIN` (например `my-shop.myshopify.com`)
-- `SHOPIFY_ADMIN_TOKEN`
+
+Shopify авторизация (выбери один способ):
+- Вариант A (рекомендуется): `SHOPIFY_CLIENT_ID` + `SHOPIFY_CLIENT_SECRET` (бот сам будет обновлять токен)
+- Вариант B: `SHOPIFY_ADMIN_TOKEN` (статический токен)
 
 Опциональные:
 - `TELEGRAM_CHANNEL_ID` (по умолчанию `-1003856584928`)
 - `PRICE_KEYWORD` (по умолчанию `cena`)
+- `PRICE_SOURCE` (по умолчанию `AUTO`). Возможные значения: `AUTO`, `EUR`, `RSD`. В `AUTO` бот выбирает цену по валюте магазина.
 - `SOLD_KEYWORDS` (по умолчанию `prodato`, можно несколько через запятую)
 - `MEDIA_GROUP_FINALIZE_SECONDS` (по умолчанию `30`)
 - `PRODUCT_SYNC_SECONDS` (по умолчанию `180`) — проверка: если товар удалён в Shopify вручную, бот удалит соответствующий пост в Telegram
@@ -31,6 +35,7 @@
 - `SHOPIFY_API_VERSION` (по умолчанию `2024-10`)
 - `SHOPIFY_PUBLISH_ALL` (по умолчанию `true`)
 - `MAX_IMAGE_BYTES` (по умолчанию `4194304`)
+- `MAX_MEDIA_GROUP_IMAGES` (по умолчанию `4`) — сколько фото из media group отправлять в Kie.ai
 
 ## Сборка локально
 ```bash
@@ -65,7 +70,22 @@ docker run --rm \
 - Muško / [подразделы]
 - Žensko / [подразделы]
 
+## Навигация (меню)
+Бот автоматически создаёт/обновляет меню `Каталог` (handle `catalog`) со структурой:
+- Muško → [подразделы]
+- Žensko → [подразделы]
+- Dečija kolekcija
+- Sniženje
+
+Для этого в приложении должны быть включены scopes:
+`read_online_store_navigation`, `write_online_store_navigation`.
+
+После создания меню его можно выбрать в админке Shopify:
+`Online Store → Navigation`.
+
 ## Примечания
 - Обновления удаления постов Telegram Bot API не предоставляет. Удаление товара происходит только при `edited_channel_post` с ключевым словом `prodato`.
 - По умолчанию бот публикует товар во всех доступных sales channels через GraphQL.
 - Kie.ai вызывается в OpenAI-совместимом формате с `image_url` и `data:image/jpeg;base64,...`. Если у вас другой endpoint или формат, задайте `KIE_ENDPOINT`.
+- Линии описания, начинающиеся с `Ako/ako`, удаляются.
+- Скидки: если первая строка начинается с `SNIŽENJE` и есть формат `4500-15%=3825`, цена ставится по последнему числу, а скидка добавляется в описание красным.

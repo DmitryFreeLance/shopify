@@ -6,8 +6,7 @@ public class PromptBuilder {
         sb.append("You will receive a marketplace post text and product photos. ");
         sb.append("Your job: classify into catalog categories and extract listing data. ");
         sb.append("Always return valid JSON only, no markdown.\n\n");
-        sb.append("Allowed sections: Muško, Žensko, Dečija kolekcija, Sniženje.\n");
-        sb.append("Allowed subcategories: Jakne, Duksevi, Džemperi, Košulje, Majice, Farmerke, Pantalone, Donji deo trenerke, Gornji deo trenerke, Šorcevi.\n");
+        sb.append("Allowed sections: Muško, Žensko, Sniženje.\n");
         sb.append("If the item can belong to multiple sections, return multiple category entries.\n");
         if (explicitSectionHint != null && !explicitSectionHint.isBlank()) {
             sb.append("Text hints section: ").append(explicitSectionHint).append(". Respect explicit section hints if present.\n");

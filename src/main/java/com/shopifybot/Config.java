@@ -12,6 +12,7 @@ public class Config {
     public final String telegramChannelUsername;
     public final String telegramLinkMetafieldNamespace;
     public final String telegramLinkMetafieldKey;
+    public final String telegramLinkMetafieldType;
     public final String priceKeyword;
     public final String priceSource;
     public final List<String> soldKeywords;
@@ -45,6 +46,7 @@ public class Config {
         this.telegramChannelUsername = getenv("TELEGRAM_CHANNEL_USERNAME", "");
         this.telegramLinkMetafieldNamespace = getenv("TELEGRAM_LINK_METAFIELD_NAMESPACE", "custom");
         this.telegramLinkMetafieldKey = getenv("TELEGRAM_LINK_METAFIELD_KEY", "tg_link");
+        this.telegramLinkMetafieldType = getenv("TELEGRAM_LINK_METAFIELD_TYPE", "link");
         this.priceKeyword = getenv("PRICE_KEYWORD", "cena").toLowerCase(Locale.ROOT);
         this.priceSource = getenv("PRICE_SOURCE", "AUTO");
         this.soldKeywords = Arrays.stream(getenv("SOLD_KEYWORDS", "prodato").split(","))

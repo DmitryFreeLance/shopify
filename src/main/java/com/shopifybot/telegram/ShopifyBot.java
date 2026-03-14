@@ -305,7 +305,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                         config.telegramLinkMetafieldNamespace,
                         config.telegramLinkMetafieldKey,
                         telegramLink,
-                        "link");
+                        config.telegramLinkMetafieldType);
             } catch (Exception e) {
                 log.warn("Failed to set telegram link metafield for product {}", productId, e);
             }
@@ -591,11 +591,11 @@ public class ShopifyBot extends TelegramLongPollingBot {
             log.info("Product {} updated from edited message {}", productId, messageId);
             if (telegramLink != null && !telegramLink.isBlank()) {
                 try {
-                shopify.setProductMetafield(productId,
-                        config.telegramLinkMetafieldNamespace,
-                        config.telegramLinkMetafieldKey,
-                        telegramLink,
-                        "link");
+                    shopify.setProductMetafield(productId,
+                            config.telegramLinkMetafieldNamespace,
+                            config.telegramLinkMetafieldKey,
+                            telegramLink,
+                            config.telegramLinkMetafieldType);
                 } catch (Exception e) {
                     log.warn("Failed to set telegram link metafield for product {}", productId, e);
                 }

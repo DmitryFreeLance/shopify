@@ -249,6 +249,17 @@ public class ShopifyClient {
 
     public void setProductMetafield(long productId, String namespace, String key, String value, String type) throws IOException {
         if (value == null || value.isBlank()) return;
+        String normalizedType = type == null ? "" : type.trim();
+        String payloadValue = value;
+        if ("link".equalsIgnoreCase(normalizedType)) {
+            String trimmed = value.trim();
+            if (!trimmed.startsWith("{")) {
+                ObjectNode link = mapper.createObjectNode();
+                link.put("url", value);
+                link.put("title", "Telegram");
+                payloadValue = mapper.writeValueAsString(link);
+            }
+        }
         String mutation = "mutation Set($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { userErrors { field message } } }";
         ObjectNode variables = mapper.createObjectNode();
         ArrayNode metafields = variables.putArray("metafields");
@@ -257,7 +268,7 @@ public class ShopifyClient {
         mf.put("namespace", namespace);
         mf.put("key", key);
         mf.put("type", type);
-        mf.put("value", value);
+        mf.put("value", payloadValue);
         JsonNode root = graphQL(mutation, variables);
         JsonNode errors = root.path("data").path("metafieldsSet").path("userErrors");
         if (errors.isArray() && errors.size() > 0) {

@@ -386,7 +386,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
         base = TextParser.removeLinesStartingWith(base, java.util.List.of("ako"));
         base = TextParser.normalizeSaleLines(base);
         if (telegramLink != null && !telegramLink.isBlank() && !base.contains(telegramLink)) {
-            base = base + "\n\n" + telegramLink;
+            String linkHtml = "<a href=\"" + telegramLink + "\">" + telegramLink + "</a>";
+            base = base + "\n\n" + linkHtml;
         }
         return base.replace("\n", "<br>");
     }

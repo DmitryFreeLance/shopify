@@ -256,7 +256,7 @@ public class ShopifyClient {
             if (!trimmed.startsWith("{")) {
                 ObjectNode link = mapper.createObjectNode();
                 link.put("url", value);
-                link.put("title", "Telegram");
+                link.put("text", "Telegram");
                 payloadValue = mapper.writeValueAsString(link);
             }
         }

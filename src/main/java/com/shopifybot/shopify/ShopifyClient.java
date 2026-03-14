@@ -9,6 +9,8 @@ import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.RequestBody;
 import okhttp3.Response;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -16,6 +18,7 @@ import java.util.Base64;
 import java.util.List;
 
 public class ShopifyClient {
+    private static final Logger log = LoggerFactory.getLogger(ShopifyClient.class);
     private static final MediaType JSON = MediaType.parse("application/json");
     private final OkHttpClient http;
     private final ObjectMapper mapper = new ObjectMapper();
@@ -242,6 +245,24 @@ public class ShopifyClient {
         ArrayNode productIds = variables.putArray("productIds");
         productIds.add("gid://shopify/Product/" + productId);
         graphQL(mutation, variables);
+    }
+
+    public void setProductMetafield(long productId, String namespace, String key, String value, String type) throws IOException {
+        if (value == null || value.isBlank()) return;
+        String mutation = "mutation Set($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { userErrors { field message } } }";
+        ObjectNode variables = mapper.createObjectNode();
+        ArrayNode metafields = variables.putArray("metafields");
+        ObjectNode mf = metafields.addObject();
+        mf.put("ownerId", "gid://shopify/Product/" + productId);
+        mf.put("namespace", namespace);
+        mf.put("key", key);
+        mf.put("type", type);
+        mf.put("value", value);
+        JsonNode root = graphQL(mutation, variables);
+        JsonNode errors = root.path("data").path("metafieldsSet").path("userErrors");
+        if (errors.isArray() && errors.size() > 0) {
+            log.warn("Failed to set metafield {}.{} for product {}: {}", namespace, key, productId, errors.toString());
+        }
     }
 
     public String findMenuIdByHandle(String handle) throws IOException {

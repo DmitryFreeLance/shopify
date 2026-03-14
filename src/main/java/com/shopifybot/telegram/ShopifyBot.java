@@ -299,6 +299,17 @@ public class ShopifyBot extends TelegramLongPollingBot {
         payload.images = images;
 
         long productId = shopify.createProduct(payload);
+        if (telegramLink != null && !telegramLink.isBlank()) {
+            try {
+                shopify.setProductMetafield(productId,
+                        config.telegramLinkMetafieldNamespace,
+                        config.telegramLinkMetafieldKey,
+                        telegramLink,
+                        "url");
+            } catch (Exception e) {
+                log.warn("Failed to set telegram link metafield for product {}", productId, e);
+            }
+        }
         if (config.shopifyPublishAll) {
             try {
                 shopify.publishProductToAll(productId);
@@ -385,10 +396,6 @@ public class ShopifyBot extends TelegramLongPollingBot {
         base = TextParser.normalizeNewlines(base);
         base = TextParser.removeLinesStartingWith(base, java.util.List.of("ako"));
         base = TextParser.normalizeSaleLines(base);
-        if (telegramLink != null && !telegramLink.isBlank() && !base.contains(telegramLink)) {
-            String linkHtml = "<a href=\"" + telegramLink + "\">" + telegramLink + "</a>";
-            base = base + "\n\n" + linkHtml;
-        }
         return base.replace("\n", "<br>");
     }
 
@@ -582,6 +589,17 @@ public class ShopifyBot extends TelegramLongPollingBot {
             ShopifyProductSnapshot snap = shopify.getProductSnapshot(productId);
             shopify.updateProduct(productId, snap.variantId, title, bodyHtml, priceSelection.price, size);
             log.info("Product {} updated from edited message {}", productId, messageId);
+            if (telegramLink != null && !telegramLink.isBlank()) {
+                try {
+                    shopify.setProductMetafield(productId,
+                            config.telegramLinkMetafieldNamespace,
+                            config.telegramLinkMetafieldKey,
+                            telegramLink,
+                            "url");
+                } catch (Exception e) {
+                    log.warn("Failed to set telegram link metafield for product {}", productId, e);
+                }
+            }
 
             try {
                 boolean saleHeader = TextParser.startsWithSaleHeader(text);

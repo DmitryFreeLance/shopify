@@ -9,6 +9,7 @@ import java.util.stream.Collectors;
 public class Config {
     public final String telegramBotToken;
     public final String telegramChannelId;
+    public final String telegramChannelUsername;
     public final String priceKeyword;
     public final String priceSource;
     public final List<String> soldKeywords;
@@ -39,6 +40,7 @@ public class Config {
     public Config() {
         this.telegramBotToken = requireEnv("TELEGRAM_BOT_TOKEN");
         this.telegramChannelId = getenv("TELEGRAM_CHANNEL_ID", "-1003856584928");
+        this.telegramChannelUsername = getenv("TELEGRAM_CHANNEL_USERNAME", "");
         this.priceKeyword = getenv("PRICE_KEYWORD", "cena").toLowerCase(Locale.ROOT);
         this.priceSource = getenv("PRICE_SOURCE", "AUTO");
         this.soldKeywords = Arrays.stream(getenv("SOLD_KEYWORDS", "prodato").split(","))

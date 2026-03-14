@@ -216,6 +216,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
 
         List<Database.MediaItem> items = db.listMediaItems(mediaGroupId);
+        Long linkMessageId = items.isEmpty() ? null : items.get(0).messageId;
+        String telegramLink = buildTelegramLink(channelId, linkMessageId);
         List<byte[]> images = new ArrayList<>();
         for (Database.MediaItem item : items) {
             try {
@@ -231,7 +233,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
 
         try {
-            long productId = processListing(channelId, text, images);
+            long productId = processListing(channelId, text, images, telegramLink);
             db.setProductIdForMediaGroup(channelId, mediaGroupId, productId);
             db.markMediaGroupProcessed(mediaGroupId);
             log.info("Media group {} processed into product {}", mediaGroupId, productId);
@@ -245,7 +247,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
         try {
             PhotoSize best = selectBestPhoto(photos);
             byte[] image = downloadFileBytes(best.getFileId());
-            long productId = processListing(channelId, text, List.of(image));
+            String telegramLink = buildTelegramLink(channelId, messageId);
+            long productId = processListing(channelId, text, List.of(image), telegramLink);
             db.setProductIdForMessage(channelId, messageId, productId);
             log.info("Message {} processed into product {}", messageId, productId);
         } catch (Exception e) {
@@ -253,7 +256,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
     }
 
-    private long processListing(String channelId, String text, List<byte[]> images) throws IOException {
+    private long processListing(String channelId, String text, List<byte[]> images, String telegramLink) throws IOException {
         boolean saleHeader = TextParser.startsWithSaleHeader(text);
         CategorySelection explicit = TextParser.detectExplicitCategories(text);
         if (saleHeader) {
@@ -284,7 +287,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
 
         TextParser.DiscountInfo discount = TextParser.extractDiscount(text);
         PriceSelection priceSelection = selectPrice(priceEur, priceRsd, discount);
-        String bodyHtml = buildDescription(text, ai.description, priceSelection, discount);
+        String bodyHtml = buildDescription(text, ai.description, priceSelection, discount, telegramLink);
 
         ShopifyClient.ProductPayload payload = new ShopifyClient.ProductPayload();
         payload.title = title;
@@ -376,13 +379,33 @@ public class ShopifyBot extends TelegramLongPollingBot {
         return tags;
     }
 
-    private String buildDescription(String originalText, String aiDescription, PriceSelection priceSelection, TextParser.DiscountInfo discount) {
+    private String buildDescription(String originalText, String aiDescription, PriceSelection priceSelection, TextParser.DiscountInfo discount, String telegramLink) {
         String base = (originalText != null && !originalText.isBlank()) ? originalText : aiDescription;
         if (base == null) base = "";
         base = TextParser.normalizeNewlines(base);
         base = TextParser.removeLinesStartingWith(base, java.util.List.of("ako"));
         base = TextParser.normalizeSaleLines(base);
+        if (telegramLink != null && !telegramLink.isBlank() && !base.contains(telegramLink)) {
+            base = base + "\n\n" + telegramLink;
+        }
         return base.replace("\n", "<br>");
+    }
+
+    private String buildTelegramLink(String channelId, Long messageId) {
+        if (messageId == null || channelId == null || channelId.isBlank()) return null;
+        String username = config.telegramChannelUsername;
+        if (username != null && !username.isBlank()) {
+            String clean = username.startsWith("@") ? username.substring(1) : username;
+            return "https://t.me/" + clean + "/" + messageId;
+        }
+        String normalized = channelId.trim();
+        if (normalized.startsWith("-100")) {
+            normalized = normalized.substring(4);
+        } else if (normalized.startsWith("-")) {
+            normalized = normalized.substring(1);
+        }
+        if (normalized.isBlank()) return null;
+        return "https://t.me/c/" + normalized + "/" + messageId;
     }
 
     private boolean hasOnlySaleCategory(CategorySelection selection) {
@@ -553,7 +576,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
             TextParser.DiscountInfo discount = TextParser.extractDiscount(text);
             PriceSelection priceSelection = selectPrice(priceEur, priceRsd, discount);
 
-            String bodyHtml = buildDescription(text, "", priceSelection, discount);
+            String telegramLink = buildTelegramLink(channelId, messageId);
+            String bodyHtml = buildDescription(text, "", priceSelection, discount, telegramLink);
             ShopifyProductSnapshot snap = shopify.getProductSnapshot(productId);
             shopify.updateProduct(productId, snap.variantId, title, bodyHtml, priceSelection.price, size);
             log.info("Product {} updated from edited message {}", productId, messageId);

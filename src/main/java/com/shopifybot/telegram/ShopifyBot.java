@@ -9,6 +9,7 @@ import com.shopifybot.db.Database.PostRef;
 import com.shopifybot.shopify.ShopifyClient;
 import com.shopifybot.shopify.ShopifyCollections;
 import com.shopifybot.shopify.ShopifyProductSnapshot;
+import com.shopifybot.shopify.RateLimitException;
 import com.shopifybot.shopify.TokenProvider;
 import com.shopifybot.util.TextParser;
 import okhttp3.OkHttpClient;
@@ -146,6 +147,13 @@ public class ShopifyBot extends TelegramLongPollingBot {
                     }
                 });
                 return;
+            }
+
+            if (existingProductId != null) {
+                Long productId = existingProductId;
+                String mediaGroupId = message.getMediaGroupId();
+                long msgId = message.getMessageId();
+                workers.submit(() -> updateTelegramLinkMetafield(productId, channelId, msgId, mediaGroupId));
             }
 
             if (message.getMediaGroupId() != null) {
@@ -414,6 +422,27 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
         if (normalized.isBlank()) return null;
         return "https://t.me/c/" + normalized + "/" + messageId + "?single";
+    }
+
+    private void updateTelegramLinkMetafield(long productId, String channelId, Long messageId, String mediaGroupId) {
+        Long resolvedMessageId = messageId;
+        if ((resolvedMessageId == null || resolvedMessageId <= 0) && mediaGroupId != null && !mediaGroupId.isBlank()) {
+            List<Long> ids = db.listMessageIdsForMediaGroup(mediaGroupId);
+            if (!ids.isEmpty()) {
+                resolvedMessageId = ids.get(0);
+            }
+        }
+        String telegramLink = buildTelegramLink(channelId, resolvedMessageId);
+        if (telegramLink == null || telegramLink.isBlank()) return;
+        try {
+            shopify.setProductMetafield(productId,
+                    config.telegramLinkMetafieldNamespace,
+                    config.telegramLinkMetafieldKey,
+                    telegramLink,
+                    config.telegramLinkMetafieldType);
+        } catch (Exception e) {
+            log.warn("Failed to set telegram link metafield for product {}", productId, e);
+        }
     }
 
     private boolean hasOnlySaleCategory(CategorySelection selection) {
@@ -754,6 +783,15 @@ public class ShopifyBot extends TelegramLongPollingBot {
                     db.markProductStatus(ref.productId, "MISSING");
                     log.info("Product missing in Shopify, deleted Telegram message(s). productId={}", ref.productId);
                 }
+                if (config.productSyncDelayMs > 0) {
+                    Thread.sleep(config.productSyncDelayMs);
+                }
+            } catch (RateLimitException e) {
+                log.warn("Rate limited by Shopify during sync (productId={}), pausing until next cycle", ref.productId);
+                return;
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return;
             } catch (Exception e) {
                 log.warn("Failed to sync product {} existence", ref.productId, e);
             }

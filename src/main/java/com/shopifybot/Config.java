@@ -18,6 +18,7 @@ public class Config {
     public final List<String> soldKeywords;
     public final long mediaGroupFinalizeSeconds;
     public final long productSyncSeconds;
+    public final long productSyncDelayMs;
     public final String sqlitePath;
 
     public final String kieApiKey;
@@ -56,6 +57,7 @@ public class Config {
                 .collect(Collectors.toList());
         this.mediaGroupFinalizeSeconds = parseLong(getenv("MEDIA_GROUP_FINALIZE_SECONDS", "30"), 30);
         this.productSyncSeconds = parseLong(getenv("PRODUCT_SYNC_SECONDS", "180"), 180);
+        this.productSyncDelayMs = parseLong(getenv("PRODUCT_SYNC_DELAY_MS", "200"), 200);
         this.sqlitePath = getenv("SQLITE_PATH", "./data/bot.db");
 
         this.kieApiKey = requireEnv("KIE_API_KEY");

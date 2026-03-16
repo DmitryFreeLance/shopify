@@ -208,6 +208,18 @@ public class ShopifyClient {
                 .build();
         try (Response response = http.newCall(request).execute()) {
             if (response.code() == 404) return false;
+            if (response.code() == 429) {
+                String retryAfter = response.header("Retry-After", "");
+                long retryAfterSeconds = 0;
+                if (retryAfter != null && !retryAfter.isBlank()) {
+                    try {
+                        retryAfterSeconds = Long.parseLong(retryAfter.trim());
+                    } catch (NumberFormatException ignored) {
+                        retryAfterSeconds = 0;
+                    }
+                }
+                throw new RateLimitException("Shopify GET product rate limited", retryAfterSeconds);
+            }
             if (!response.isSuccessful()) {
                 throw new IOException("Shopify GET product failed: " + response.code() + " " + response.message());
             }

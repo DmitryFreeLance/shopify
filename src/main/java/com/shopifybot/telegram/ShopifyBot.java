@@ -404,7 +404,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         String username = config.telegramChannelUsername;
         if (username != null && !username.isBlank()) {
             String clean = username.startsWith("@") ? username.substring(1) : username;
-            return "https://t.me/" + clean + "/" + messageId;
+            return "https://t.me/" + clean + "/" + messageId + "?single";
         }
         String normalized = channelId.trim();
         if (normalized.startsWith("-100")) {
@@ -413,7 +413,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
             normalized = normalized.substring(1);
         }
         if (normalized.isBlank()) return null;
-        return "https://t.me/c/" + normalized + "/" + messageId;
+        return "https://t.me/c/" + normalized + "/" + messageId + "?single";
     }
 
     private boolean hasOnlySaleCategory(CategorySelection selection) {

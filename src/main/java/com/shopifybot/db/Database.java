@@ -683,6 +683,23 @@ public class Database {
         return null;
     }
 
+    public ProductCard findProductCardByArticle(String article) {
+        String sql = "SELECT product_id, channel_id, message_id, media_group_id, title, size, description, article, " +
+                "base_price_rsd, current_price_rsd, discount_percent, fixed_price_rsd, status, created_at, updated_at " +
+                "FROM product_cards WHERE article=? LIMIT 1";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, article);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return mapProductCard(rs);
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("DB findProductCardByArticle failed", e);
+        }
+        return null;
+    }
+
     public boolean existsActiveArticle(String article) {
         String sql = "SELECT 1 FROM product_cards WHERE article=? AND status IN ('ACTIVE','RESERVED') LIMIT 1";
         try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -746,6 +763,16 @@ public class Database {
 
     public void updateProductCardReservation(long productId, boolean reserved) {
         updateProductCardStatus(productId, reserved ? "RESERVED" : "ACTIVE");
+    }
+
+    public void deleteProductCard(long productId) {
+        String sql = "DELETE FROM product_cards WHERE product_id=?";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, productId);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("DB deleteProductCard failed", e);
+        }
     }
 
     public void updateProductCardPricing(long productId, double currentPriceRsd, int discountPercent, Double fixedPriceRsd) {

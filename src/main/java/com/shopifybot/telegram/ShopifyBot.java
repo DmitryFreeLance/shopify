@@ -499,9 +499,13 @@ public class ShopifyBot extends TelegramLongPollingBot {
                     ));
             return;
         }
-        if (db.existsActiveArticle(article)) {
+        ProductCard existingByArticle = db.findProductCardByArticle(article);
+        if (existingByArticle != null) {
             sendText(chatId,
-                    "⚠️ Этот артикул уже используется в активном товаре.\nУкажите другой.",
+                    "⚠️ Этот артикул уже используется.\n" +
+                            "Товар: " + existingByArticle.title + "\n" +
+                            "Статус: " + statusLabel(existingByArticle.status) + "\n" +
+                            "Укажите другой артикул.",
                     inlineSingleColumn(
                             button("Назад", CB_BACK_TO_PHOTOS),
                             button("Отменить", CB_CANCEL_FLOW)
@@ -595,7 +599,16 @@ public class ShopifyBot extends TelegramLongPollingBot {
             String caption = buildProductCaption(finalTitle, finalSize, basePrice, basePrice, article, 0, null, "ACTIVE");
 
             long productId = 0;
+            PublishResult pub = null;
             try {
+                ProductCard existing = db.findProductCardByArticle(article);
+                if (existing != null) {
+                    sendWelcomeMenu(chatId,
+                            "⚠️ Артикул " + article + " уже существует (" + statusLabel(existing.status) + ").\n" +
+                                    "Выберите другой артикул.");
+                    return;
+                }
+
                 ShopifyClient.ProductPayload payload = new ShopifyClient.ProductPayload();
                 payload.title = finalTitle;
                 payload.bodyHtml = caption.replace("\n", "<br>");
@@ -628,7 +641,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                     }
                 }
 
-                PublishResult pub = publishToListingChat(caption, images);
+                pub = publishToListingChat(caption, images);
                 String telegramLink = buildTelegramLink(pub.channelId, pub.primaryMessageId);
                 if (telegramLink != null && !telegramLink.isBlank()) {
                     try {
@@ -675,13 +688,24 @@ public class ShopifyBot extends TelegramLongPollingBot {
                         "✅ Товар опубликован.\nНазвание: " + finalTitle + "\nЦена: " + formatRsd(basePrice) + " RSD\nАртикул: " + article);
             } catch (Exception e) {
                 log.error("Failed to create product from admin flow", e);
+                String errorText = e.getMessage() == null ? "" : e.getMessage();
+                boolean articleConflict = errorText.contains("product_cards.article") || errorText.contains("DB upsertProductCard failed");
                 if (productId > 0) {
                     try {
                         shopify.deleteProduct(productId);
                     } catch (Exception ignored) {
                     }
                 }
-                sendWelcomeMenu(chatId, "❌ Ошибка публикации товара: " + e.getMessage());
+                if (pub != null) {
+                    deleteTelegramByReference(pub.channelId, pub.primaryMessageId, pub.mediaGroupId);
+                }
+                if (articleConflict) {
+                    sendWelcomeMenu(chatId,
+                            "⚠️ Артикул уже существует в базе.\n" +
+                                    "Товар не создан. Используйте другой артикул из 8 цифр.");
+                } else {
+                    sendWelcomeMenu(chatId, "❌ Ошибка публикации товара: " + e.getMessage());
+                }
             }
         });
     }
@@ -894,8 +918,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
         } catch (Exception e) {
             log.warn("Failed to delete product {} from Shopify", card.productId, e);
         }
-        db.updateProductCardStatus(card.productId, "SOLD");
         db.markProductStatus(card.productId, "SOLD");
+        db.deleteProductCard(card.productId);
         deleteTelegramByReference(card.channelId, card.messageId, card.mediaGroupId);
     }
 
@@ -991,6 +1015,15 @@ public class ShopifyBot extends TelegramLongPollingBot {
             return String.valueOf((long) Math.round(value));
         }
         return String.format(Locale.US, "%.2f", value);
+    }
+
+    private String statusLabel(String status) {
+        if ("ACTIVE".equals(status)) return "AKTIVAN";
+        if ("RESERVED".equals(status)) return "REZERVISANO";
+        if ("SOLD".equals(status)) return "PRODATO";
+        if ("OUT_OF_STOCK".equals(status)) return "RASPRODATO";
+        if ("MISSING".equals(status)) return "OBRISANO";
+        return status == null ? "-" : status;
     }
 
     private void sendWelcomeMenu(long chatId) {
@@ -1862,7 +1895,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         try {
             shopify.deleteProduct(productId);
             db.markProductStatus(productId, "SOLD");
-            db.updateProductCardStatus(productId, "SOLD");
+            db.deleteProductCard(productId);
             log.info("Product {} deleted in Shopify (sold)", productId);
         } catch (Exception e) {
             log.warn("Failed to delete product {} (sold)", productId, e);
@@ -2061,12 +2094,12 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 if (availability == ShopifyClient.ProductAvailability.MISSING) {
                     deleteTelegramByReference(ref.channelId, ref.messageId, ref.mediaGroupId);
                     db.markProductStatus(ref.productId, "MISSING");
-                    db.updateProductCardStatus(ref.productId, "MISSING");
+                    db.deleteProductCard(ref.productId);
                     log.info("Product missing in Shopify, deleted Telegram message(s). productId={}", ref.productId);
                 } else if (availability == ShopifyClient.ProductAvailability.OUT_OF_STOCK) {
                     deleteTelegramByReference(ref.channelId, ref.messageId, ref.mediaGroupId);
                     db.markProductStatus(ref.productId, "OUT_OF_STOCK");
-                    db.updateProductCardStatus(ref.productId, "OUT_OF_STOCK");
+                    db.deleteProductCard(ref.productId);
                     log.info("Product out of stock in Shopify, deleted Telegram message(s). productId={}", ref.productId);
                 }
                 if (config.productSyncDelayMs > 0) {

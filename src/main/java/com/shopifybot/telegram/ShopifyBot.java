@@ -73,7 +73,6 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private static final String CB_SOLD = "OPEN:SOLD";
     private static final String CB_USERS = "OPEN:USERS";
     private static final String CB_ADD_ADMIN = "OPEN:ADD_ADMIN";
-    private static final String CB_ADD_MENU = "OPEN:ADD_MENU";
     private static final String CB_DISCOUNTS = "OPEN:DISCOUNTS";
     private static final String CB_DISCOUNTS_DISABLE = "DISCOUNT:DISABLE";
     private static final String CB_DISCOUNTS_ENABLE = "DISCOUNT:ENABLE";
@@ -216,12 +215,6 @@ public class ShopifyBot extends TelegramLongPollingBot {
             resetSession(session);
             session.state = AdminState.ADD_PRODUCT_PHOTOS;
             sendPhotoUploadPrompt(chatId, session.pendingPhotoFileIds.size());
-            answerCallback(callback, "");
-            return;
-        }
-        if (CB_ADD_MENU.equals(data)) {
-            resetSession(session);
-            sendAddMenu(chatId);
             answerCallback(callback, "");
             return;
         }
@@ -390,7 +383,13 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
         if ("/add".equalsIgnoreCase(text)) {
             resetSession(session);
-            sendAddMenu(chatId);
+            session.state = AdminState.ADD_ADMIN_ID;
+            sendText(chatId,
+                    "Введите Telegram ID пользователя, которого нужно сделать админом.",
+                    inlineSingleColumn(
+                            button("👥 Список пользователей", CB_USERS),
+                            button("Отменить", CB_CANCEL_FLOW)
+                    ));
             return;
         }
         if ("/discounts".equalsIgnoreCase(text)) {
@@ -761,7 +760,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         appendPaginationRows(rows, "PRODUCTS", safePage, pages);
-        rows.add(List.of(button("⬅ Назад", CB_ADD_MENU)));
+        rows.add(List.of(button("⬅ Назад в меню", CB_MENU)));
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         markup.setKeyboard(rows);
         sendText(chatId, sb.toString(), markup);
@@ -1000,22 +999,11 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private void sendWelcomeMenu(long chatId, String status) {
         StringBuilder text = new StringBuilder();
         text.append("✨ Панель управления SecondHand Ogledalo\n");
-        text.append("Выберите действие из меню ниже.\n");
-        text.append("Команды: /discounts и /add");
+        text.append("Выберите действие из меню ниже.");
         if (status != null && !status.isBlank()) {
             text.append("\n\n").append(status);
         }
         sendText(chatId, text.toString(), buildMainInlineKeyboard());
-    }
-
-    private void sendAddMenu(long chatId) {
-        sendText(chatId,
-                "🛠 Управление доступом\nВыберите действие:",
-                inlineSingleColumn(
-                        button("👥 Список пользователей", CB_USERS),
-                        button("🛡 Добавить админа", CB_ADD_ADMIN),
-                        button("⬅ Назад в меню", CB_MENU)
-                ));
     }
 
     private void sendDiscountsDashboard(long chatId) {

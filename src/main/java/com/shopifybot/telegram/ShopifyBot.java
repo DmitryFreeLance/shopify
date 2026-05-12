@@ -45,6 +45,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.YearMonth;
 import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -72,9 +73,14 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private static final String CB_SOLD = "OPEN:SOLD";
     private static final String CB_USERS = "OPEN:USERS";
     private static final String CB_ADD_ADMIN = "OPEN:ADD_ADMIN";
+    private static final String CB_DISCOUNTS = "OPEN:DISCOUNTS";
+    private static final String CB_DISCOUNTS_DISABLE = "DISCOUNT:DISABLE";
+    private static final String CB_DISCOUNTS_ENABLE = "DISCOUNT:ENABLE";
+    private static final String CB_MANUAL_DISCOUNT = "OPEN:MANUAL_DISCOUNT";
     private static final String CB_DONE_PHOTOS = "FLOW:DONE_PHOTOS";
     private static final String CB_BACK_TO_PHOTOS = "FLOW:BACK_TO_PHOTOS";
     private static final String CB_CANCEL_FLOW = "FLOW:CANCEL";
+    private static final String META_DISCOUNT_ENABLED = "discount:enabled";
 
     private final Config config;
     private final Database db;
@@ -255,6 +261,32 @@ public class ShopifyBot extends TelegramLongPollingBot {
             answerCallback(callback, "");
             return;
         }
+        if (CB_DISCOUNTS.equals(data)) {
+            resetSession(session);
+            sendDiscountsDashboard(chatId);
+            answerCallback(callback, "");
+            return;
+        }
+        if (CB_DISCOUNTS_DISABLE.equals(data)) {
+            db.setMeta(META_DISCOUNT_ENABLED, "false");
+            sendDiscountsDashboard(chatId, "⏸ Прогрессивные скидки отключены.");
+            answerCallback(callback, "Скидки отключены");
+            return;
+        }
+        if (CB_DISCOUNTS_ENABLE.equals(data)) {
+            db.setMeta(META_DISCOUNT_ENABLED, "true");
+            db.setMeta("discount:last_sync_date", "");
+            sendDiscountsDashboard(chatId, "▶️ Прогрессивные скидки включены.");
+            answerCallback(callback, "Скидки включены");
+            return;
+        }
+        if (CB_MANUAL_DISCOUNT.equals(data)) {
+            resetSession(session);
+            session.state = AdminState.MANUAL_DISCOUNT_SELECT;
+            sendSelectableProductsPage(chatId, session, 0);
+            answerCallback(callback, "");
+            return;
+        }
         if (CB_DONE_PHOTOS.equals(data)) {
             if (session.state != AdminState.ADD_PRODUCT_PHOTOS) {
                 session.state = AdminState.ADD_PRODUCT_PHOTOS;
@@ -313,33 +345,13 @@ public class ShopifyBot extends TelegramLongPollingBot {
                     session.state = AdminState.SOLD_SELECT;
                     sendSelectableProductsPage(chatId, session, page);
                     break;
+                case "MANUAL":
+                    session.state = AdminState.MANUAL_DISCOUNT_SELECT;
+                    sendSelectableProductsPage(chatId, session, page);
+                    break;
                 default:
                     break;
             }
-            answerCallback(callback, "");
-            return;
-        }
-
-        if (data.startsWith("SELECT:")) {
-            String[] parts = data.split(":");
-            if (parts.length != 3) {
-                answerCallback(callback, "Некорректный выбор");
-                return;
-            }
-            if (!"RESERVE".equals(parts[1]) && !"UNRESERVE".equals(parts[1]) && !"SOLD".equals(parts[1])) {
-                answerCallback(callback, "Некорректный выбор");
-                return;
-            }
-            long productId;
-            try {
-                productId = Long.parseLong(parts[2]);
-            } catch (NumberFormatException e) {
-                answerCallback(callback, "Некорректный товар");
-                return;
-            }
-            session.state = "RESERVE".equals(parts[1]) ? AdminState.RESERVE_SELECT :
-                    "UNRESERVE".equals(parts[1]) ? AdminState.UNRESERVE_SELECT : AdminState.SOLD_SELECT;
-            processSelectionByProductId(chatId, session, productId);
             answerCallback(callback, "");
             return;
         }
@@ -419,7 +431,10 @@ public class ShopifyBot extends TelegramLongPollingBot {
             return;
         }
 
-        if (session.state == AdminState.RESERVE_SELECT || session.state == AdminState.UNRESERVE_SELECT || session.state == AdminState.SOLD_SELECT) {
+        if (session.state == AdminState.RESERVE_SELECT
+                || session.state == AdminState.UNRESERVE_SELECT
+                || session.state == AdminState.SOLD_SELECT
+                || session.state == AdminState.MANUAL_DISCOUNT_SELECT) {
             int ordinal;
             try {
                 ordinal = Integer.parseInt(text);
@@ -428,6 +443,25 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 return;
             }
             processSelectionByOrdinal(chatId, session, ordinal);
+            return;
+        }
+
+        if (session.state == AdminState.MANUAL_DISCOUNT_INPUT) {
+            if (session.selectedProductId <= 0) {
+                resetSession(session);
+                sendDiscountsDashboard(chatId, "⚠️ Товар для скидки не выбран. Начните заново.");
+                return;
+            }
+            Double newPrice = parsePriceInput(text);
+            if (newPrice == null || newPrice <= 0) {
+                sendText(chatId,
+                        "Введите новую цену числом, например: 1200",
+                        inlineSingleColumn(
+                                button("Отменить", CB_CANCEL_FLOW)
+                        ));
+                return;
+            }
+            applyManualDiscount(chatId, session, newPrice);
             return;
         }
 
@@ -770,6 +804,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
             sb.append("🟡 Выберите товар для резерва.");
         } else if (session.state == AdminState.UNRESERVE_SELECT) {
             sb.append("🟢 Выберите товар для снятия резерва.");
+        } else if (session.state == AdminState.MANUAL_DISCOUNT_SELECT) {
+            sb.append("🏷 Выберите товар для ручной скидки.");
         } else {
             sb.append("✅ Выберите товар для отметки \"Продано\".");
         }
@@ -795,7 +831,9 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
 
         String scope = session.state == AdminState.RESERVE_SELECT ? "RESERVE"
-                : session.state == AdminState.UNRESERVE_SELECT ? "UNRESERVE" : "SOLD";
+                : session.state == AdminState.UNRESERVE_SELECT ? "UNRESERVE"
+                : session.state == AdminState.MANUAL_DISCOUNT_SELECT ? "MANUAL"
+                : "SOLD";
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         appendPaginationRows(rows, scope, safePage, pages);
         rows.add(List.of(button("⬅ Назад в меню", CB_MENU)));
@@ -812,43 +850,6 @@ public class ShopifyBot extends TelegramLongPollingBot {
         rows.add(List.of(button("Страница " + (page + 1) + "/" + pages, CB_NOOP)));
         if (page + 1 < pages) {
             rows.add(List.of(button("Следующая страница ➡", "PAGE:" + scope + ":" + (page + 1))));
-        }
-    }
-
-    private void processSelectionByProductId(long chatId, AdminSession session, long productId) {
-        ProductCard card = db.findProductCardById(productId);
-        if (card == null) {
-            sendWelcomeMenu(chatId, "Позиция не найдена. Обновите список и попробуйте снова.");
-            return;
-        }
-
-        try {
-            if (session.state == AdminState.RESERVE_SELECT) {
-                if ("RESERVED".equals(card.status)) {
-                    sendSelectableProductsPage(chatId, session, 0);
-                    sendText(chatId, "Этот товар уже зарезервирован.");
-                    return;
-                }
-                syncCardState(card, "RESERVED", card.discountPercent, card.fixedPriceRsd, card.currentPriceRsd);
-                sendSelectableProductsPage(chatId, session, 0);
-                sendText(chatId, "Резерв поставлен: " + card.title + " (Artikal: " + card.article + ")");
-                return;
-            }
-            if (session.state == AdminState.UNRESERVE_SELECT) {
-                syncCardState(card, "ACTIVE", card.discountPercent, card.fixedPriceRsd, card.currentPriceRsd);
-                sendSelectableProductsPage(chatId, session, 0);
-                sendText(chatId, "Резерв снят: " + card.title + " (Artikal: " + card.article + ")");
-                return;
-            }
-            if (session.state == AdminState.SOLD_SELECT) {
-                markCardAsSold(card);
-                sendSelectableProductsPage(chatId, session, 0);
-                sendText(chatId, "Товар помечен проданным: " + card.title + " (Artikal: " + card.article + ")");
-            }
-        } catch (Exception e) {
-            log.warn("Failed to process selection for product {}", card.productId, e);
-            sendSelectableProductsPage(chatId, session, 0);
-            sendText(chatId, "Не удалось выполнить действие: " + e.getMessage());
         }
     }
 
@@ -986,6 +987,60 @@ public class ShopifyBot extends TelegramLongPollingBot {
         sendText(chatId, text.toString(), buildMainInlineKeyboard());
     }
 
+    private void sendDiscountsDashboard(long chatId) {
+        sendDiscountsDashboard(chatId, null);
+    }
+
+    private void sendDiscountsDashboard(long chatId, String statusMessage) {
+        LocalDate today = LocalDate.now(discountZone == null ? ZoneId.systemDefault() : discountZone);
+        boolean enabled = isDiscountsEnabled();
+        String phase = describeDiscountStage(today);
+        String dateLabel = today.format(DateTimeFormatter.ofPattern("dd.MM.yyyy"));
+
+        StringBuilder text = new StringBuilder();
+        text.append("🧾 Скидки\n");
+        text.append("Статус: ").append(enabled ? "включены ✅" : "отключены ⏸").append("\n");
+        text.append("Сегодня: ").append(dateLabel).append("\n");
+        text.append("Текущий этап: ").append(phase).append("\n");
+        text.append("\n");
+        text.append("Автосистема применяет изменения 1 раз в день.\n");
+        text.append("Базовая прогрессия по возрасту: 0% → 15% → 30% → 50%.\n");
+        text.append("Последняя неделя месяца: Пн 20%, Вт 30%, Ср 40%, Чт 50%, Пт 500, Сб/Вс 350.");
+        if (statusMessage != null && !statusMessage.isBlank()) {
+            text.append("\n\n").append(statusMessage);
+        }
+
+        InlineKeyboardButton toggle = enabled
+                ? button("⏸ Отключить скидки", CB_DISCOUNTS_DISABLE)
+                : button("▶️ Включить скидки", CB_DISCOUNTS_ENABLE);
+        sendText(chatId, text.toString(), inlineSingleColumn(
+                toggle,
+                button("🏷 Скидка на товар", CB_MANUAL_DISCOUNT),
+                button("⬅ Назад в меню", CB_MENU)
+        ));
+    }
+
+    private boolean isDiscountsEnabled() {
+        String value = db.getMeta(META_DISCOUNT_ENABLED);
+        if (value == null || value.isBlank()) return true;
+        return !"false".equalsIgnoreCase(value.trim());
+    }
+
+    private String describeDiscountStage(LocalDate today) {
+        LocalDate monthEnd = YearMonth.from(today).atEndOfMonth();
+        LocalDate lastWeekStart = monthEnd.with(java.time.temporal.TemporalAdjusters.previousOrSame(java.time.DayOfWeek.MONDAY));
+        if (today.isBefore(lastWeekStart)) {
+            return "прогрессивный этап по возрасту товара";
+        }
+        int dow = today.getDayOfWeek().getValue(); // Mon=1
+        if (dow == 1) return "последняя неделя: минимум 20%";
+        if (dow == 2) return "последняя неделя: минимум 30%";
+        if (dow == 3) return "последняя неделя: минимум 40%";
+        if (dow == 4) return "последняя неделя: минимум 50%";
+        if (dow == 5) return "последняя неделя: все по 500";
+        return "последняя неделя: все по 350";
+    }
+
     private void sendPhotoUploadPrompt(long chatId, int photoCount) {
         String text = "📸 Добавление товара\n\n" +
                 "Загрузите до 9 фото.\n" +
@@ -1029,6 +1084,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 button("🟡 Зарезервировать", CB_RESERVE),
                 button("🟢 Снять резерв", CB_UNRESERVE),
                 button("✅ Продано", CB_SOLD),
+                button("🧾 Скидки", CB_DISCOUNTS),
+                button("🏷 Скидка на товар", CB_MANUAL_DISCOUNT),
                 button("👥 Список пользователей", CB_USERS),
                 button("🛡 Добавить админа", CB_ADD_ADMIN)
         );
@@ -1070,6 +1127,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private void resetSession(AdminSession session) {
         session.state = AdminState.IDLE;
         session.pendingPhotoFileIds.clear();
+        session.selectedProductId = 0;
     }
 
     private void syncDiscountsSafe() {
@@ -1080,7 +1138,49 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
     }
 
+    private Double parsePriceInput(String text) {
+        if (text == null) return null;
+        String cleaned = text.trim()
+                .replace("RSD", "")
+                .replace("rsd", "")
+                .replace("дин", "")
+                .replace("din", "")
+                .replace(" ", "");
+        cleaned = cleaned.replace(",", ".");
+        cleaned = cleaned.replaceAll("[^0-9.]", "");
+        if (cleaned.isBlank()) return null;
+        try {
+            return Double.parseDouble(cleaned);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private void applyManualDiscount(long chatId, AdminSession session, double newPrice) {
+        ProductCard card = db.findProductCardById(session.selectedProductId);
+        if (card == null || (!"ACTIVE".equals(card.status) && !"RESERVED".equals(card.status))) {
+            resetSession(session);
+            sendDiscountsDashboard(chatId, "⚠️ Товар не найден среди активных. Попробуйте снова.");
+            return;
+        }
+        try {
+            int discountPercent = discountPercentByFixed(card.basePriceRsd, newPrice);
+            syncCardState(card, card.status, discountPercent, newPrice, newPrice);
+            session.state = AdminState.MANUAL_DISCOUNT_SELECT;
+            session.selectedProductId = 0;
+            sendText(chatId,
+                    "✅ Цена обновлена: " + card.title + "\nНовая цена: " + formatRsd(newPrice) + " RSD\nТовар помечен как SNIŽENJE.");
+            sendSelectableProductsPage(chatId, session, 0);
+        } catch (Exception e) {
+            log.warn("Failed to apply manual discount for product {}", card.productId, e);
+            sendText(chatId, "❌ Не удалось применить скидку: " + e.getMessage());
+        }
+    }
+
     private void syncDiscounts() {
+        if (!isDiscountsEnabled()) {
+            return;
+        }
         LocalDate today = LocalDate.now(discountZone == null ? ZoneId.systemDefault() : discountZone);
         String key = "discount:last_sync_date";
         String lastDate = db.getMeta(key);
@@ -1204,12 +1304,15 @@ public class ShopifyBot extends TelegramLongPollingBot {
         ADD_ADMIN_ID,
         RESERVE_SELECT,
         UNRESERVE_SELECT,
-        SOLD_SELECT
+        SOLD_SELECT,
+        MANUAL_DISCOUNT_SELECT,
+        MANUAL_DISCOUNT_INPUT
     }
 
     private static class AdminSession {
         AdminState state = AdminState.IDLE;
         final List<String> pendingPhotoFileIds = new ArrayList<>();
+        long selectedProductId = 0;
     }
 
     private void handleMessage(Message message, boolean isEdit) {
@@ -1963,6 +2066,16 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 markCardAsSold(card);
                 sendText(chatId, "✅ Товар помечен проданным: " + card.title + " (Artikal: " + card.article + ")");
                 sendSelectableProductsPage(chatId, session, 0);
+                return;
+            }
+            if (session.state == AdminState.MANUAL_DISCOUNT_SELECT) {
+                session.selectedProductId = card.productId;
+                session.state = AdminState.MANUAL_DISCOUNT_INPUT;
+                sendText(chatId,
+                        "Введите новую цену для товара:\n" + card.title + "\nТекущая цена: " + formatRsd(card.currentPriceRsd) + " RSD",
+                        inlineSingleColumn(
+                                button("Отменить", CB_CANCEL_FLOW)
+                        ));
             }
         } catch (Exception e) {
             log.warn("Failed to process selection by ordinal for product {}", card.productId, e);

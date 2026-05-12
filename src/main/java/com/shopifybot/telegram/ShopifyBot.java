@@ -1129,18 +1129,17 @@ public class ShopifyBot extends TelegramLongPollingBot {
         int discount = ageWeeks <= 0 ? 0 : ageWeeks == 1 ? 15 : ageWeeks == 2 ? 30 : 50;
 
         YearMonth ym = YearMonth.from(today);
-        int lastDay = ym.lengthOfMonth();
-        int day = today.getDayOfMonth();
         Double fixed = null;
 
-        if (day == lastDay) {
-            fixed = 350.0;
-        } else if (day == lastDay - 1) {
-            fixed = 500.0;
-        } else {
-            int weekOfMonth = ((day - 1) / 7) + 1;
-            if (weekOfMonth >= 4) {
-                int dow = today.getDayOfWeek().getValue(); // Mon=1
+        LocalDate monthEnd = ym.atEndOfMonth();
+        LocalDate lastWeekStart = monthEnd.with(java.time.temporal.TemporalAdjusters.previousOrSame(java.time.DayOfWeek.MONDAY));
+        if (!today.isBefore(lastWeekStart)) {
+            int dow = today.getDayOfWeek().getValue(); // Mon=1
+            if (dow == 5) {
+                fixed = 500.0;
+            } else if (dow >= 6) {
+                fixed = 350.0;
+            } else {
                 int minDiscount;
                 if (dow == 1) {
                     minDiscount = 20;

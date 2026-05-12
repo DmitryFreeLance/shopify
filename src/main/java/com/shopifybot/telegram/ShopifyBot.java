@@ -419,6 +419,18 @@ public class ShopifyBot extends TelegramLongPollingBot {
             return;
         }
 
+        if (session.state == AdminState.RESERVE_SELECT || session.state == AdminState.UNRESERVE_SELECT || session.state == AdminState.SOLD_SELECT) {
+            int ordinal;
+            try {
+                ordinal = Integer.parseInt(text);
+            } catch (NumberFormatException e) {
+                sendText(chatId, "Введите номер позиции цифрой (например: 1).");
+                return;
+            }
+            processSelectionByOrdinal(chatId, session, ordinal);
+            return;
+        }
+
         sendWelcomeMenu(chatId, "Используйте кнопки ниже.");
     }
 
@@ -763,6 +775,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
         sb.append("\nВсего: ").append(total).append("\n");
         sb.append("Страница ").append(safePage + 1).append("/").append(pages).append("\n");
+        sb.append("Введите номер позиции цифрой.\n");
 
         if (items.isEmpty()) {
             sb.append("\nСписок пуст.");
@@ -784,16 +797,6 @@ public class ShopifyBot extends TelegramLongPollingBot {
         String scope = session.state == AdminState.RESERVE_SELECT ? "RESERVE"
                 : session.state == AdminState.UNRESERVE_SELECT ? "UNRESERVE" : "SOLD";
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
-        int startOrdinal = safePage * pageSize + 1;
-        for (int i = 0; i < items.size(); i++) {
-            ProductCard card = items.get(i);
-            String title = card.title == null ? "" : card.title.trim();
-            if (title.length() > 26) {
-                title = title.substring(0, 26) + "...";
-            }
-            String buttonText = (startOrdinal + i) + ". " + title + " (" + formatRsd(card.currentPriceRsd) + ")";
-            rows.add(List.of(button(buttonText, "SELECT:" + scope + ":" + card.productId)));
-        }
         appendPaginationRows(rows, scope, safePage, pages);
         rows.add(List.of(button("⬅ Назад в меню", CB_MENU)));
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
@@ -1921,6 +1924,50 @@ public class ShopifyBot extends TelegramLongPollingBot {
             } catch (Exception e) {
                 log.warn("Failed to sync product {} existence", ref.productId, e);
             }
+        }
+    }
+
+    private void processSelectionByOrdinal(long chatId, AdminSession session, int ordinal) {
+        if (ordinal <= 0) {
+            sendText(chatId, "Номер должен быть больше 0.");
+            return;
+        }
+        ProductCard card;
+        if (session.state == AdminState.UNRESERVE_SELECT) {
+            card = db.findReservedProductByOrdinal(ordinal);
+        } else {
+            card = db.findVisibleProductByOrdinal(ordinal);
+        }
+        if (card == null) {
+            sendText(chatId, "Позиция не найдена. Проверьте номер и попробуйте снова.");
+            return;
+        }
+
+        try {
+            if (session.state == AdminState.RESERVE_SELECT) {
+                if ("RESERVED".equals(card.status)) {
+                    sendText(chatId, "Этот товар уже зарезервирован.");
+                    return;
+                }
+                syncCardState(card, "RESERVED", card.discountPercent, card.fixedPriceRsd, card.currentPriceRsd);
+                sendText(chatId, "✅ Резерв поставлен: " + card.title + " (Artikal: " + card.article + ")");
+                sendSelectableProductsPage(chatId, session, 0);
+                return;
+            }
+            if (session.state == AdminState.UNRESERVE_SELECT) {
+                syncCardState(card, "ACTIVE", card.discountPercent, card.fixedPriceRsd, card.currentPriceRsd);
+                sendText(chatId, "✅ Резерв снят: " + card.title + " (Artikal: " + card.article + ")");
+                sendSelectableProductsPage(chatId, session, 0);
+                return;
+            }
+            if (session.state == AdminState.SOLD_SELECT) {
+                markCardAsSold(card);
+                sendText(chatId, "✅ Товар помечен проданным: " + card.title + " (Artikal: " + card.article + ")");
+                sendSelectableProductsPage(chatId, session, 0);
+            }
+        } catch (Exception e) {
+            log.warn("Failed to process selection by ordinal for product {}", card.productId, e);
+            sendText(chatId, "❌ Не удалось выполнить действие: " + e.getMessage());
         }
     }
 

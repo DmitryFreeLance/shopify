@@ -666,6 +666,80 @@ public class Database {
         return items.isEmpty() ? null : items.get(0);
     }
 
+    public ProductCard findVisibleProductByArticle(String article) {
+        String sql = "SELECT product_id, channel_id, message_id, media_group_id, title, size, description, article, " +
+                "base_price_rsd, current_price_rsd, discount_percent, fixed_price_rsd, status, created_at, updated_at " +
+                "FROM product_cards WHERE article=? AND status IN ('ACTIVE','RESERVED') LIMIT 1";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, article);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return mapProductCard(rs);
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("DB findVisibleProductByArticle failed", e);
+        }
+        return null;
+    }
+
+    public ProductCard findReservedProductByArticle(String article) {
+        String sql = "SELECT product_id, channel_id, message_id, media_group_id, title, size, description, article, " +
+                "base_price_rsd, current_price_rsd, discount_percent, fixed_price_rsd, status, created_at, updated_at " +
+                "FROM product_cards WHERE article=? AND status='RESERVED' LIMIT 1";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, article);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return mapProductCard(rs);
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("DB findReservedProductByArticle failed", e);
+        }
+        return null;
+    }
+
+    public Integer findVisibleOrdinalByProductId(long productId) {
+        ProductCard card = findProductCardById(productId);
+        if (card == null) return null;
+        String sql = "SELECT COUNT(*) FROM product_cards WHERE status IN ('ACTIVE','RESERVED') " +
+                "AND (created_at < ? OR (created_at = ? AND product_id <= ?))";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, card.createdAt);
+            ps.setLong(2, card.createdAt);
+            ps.setLong(3, card.productId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return rs.getInt(1);
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("DB findVisibleOrdinalByProductId failed", e);
+        }
+        return null;
+    }
+
+    public Integer findReservedOrdinalByProductId(long productId) {
+        ProductCard card = findProductCardById(productId);
+        if (card == null) return null;
+        String sql = "SELECT COUNT(*) FROM product_cards WHERE status='RESERVED' " +
+                "AND (created_at < ? OR (created_at = ? AND product_id <= ?))";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, card.createdAt);
+            ps.setLong(2, card.createdAt);
+            ps.setLong(3, card.productId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return rs.getInt(1);
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("DB findReservedOrdinalByProductId failed", e);
+        }
+        return null;
+    }
+
     public ProductCard findProductCardById(long productId) {
         String sql = "SELECT product_id, channel_id, message_id, media_group_id, title, size, description, article, " +
                 "base_price_rsd, current_price_rsd, discount_percent, fixed_price_rsd, status, created_at, updated_at " +

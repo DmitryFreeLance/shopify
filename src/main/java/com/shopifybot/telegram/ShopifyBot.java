@@ -81,6 +81,11 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private static final String CB_DONE_PHOTOS = "FLOW:DONE_PHOTOS";
     private static final String CB_BACK_TO_PHOTOS = "FLOW:BACK_TO_PHOTOS";
     private static final String CB_CANCEL_FLOW = "FLOW:CANCEL";
+    private static final String CB_SEARCH_PRODUCTS = "SEARCH:PRODUCTS";
+    private static final String CB_SEARCH_RESERVE = "SEARCH:RESERVE";
+    private static final String CB_SEARCH_UNRESERVE = "SEARCH:UNRESERVE";
+    private static final String CB_SEARCH_SOLD = "SEARCH:SOLD";
+    private static final String CB_SEARCH_MANUAL = "SEARCH:MANUAL";
     private static final String META_DISCOUNT_ENABLED = "discount:enabled";
     private static final String META_DISCOUNT_RESET_START = "discount:reset_start_date";
 
@@ -316,6 +321,41 @@ public class ShopifyBot extends TelegramLongPollingBot {
             answerCallback(callback, "");
             return;
         }
+        if (CB_SEARCH_PRODUCTS.equals(data)) {
+            session.state = AdminState.ARTICLE_SEARCH_INPUT;
+            session.searchScope = ProductSearchScope.PRODUCTS;
+            sendArticleSearchPrompt(chatId);
+            answerCallback(callback, "");
+            return;
+        }
+        if (CB_SEARCH_RESERVE.equals(data)) {
+            session.state = AdminState.ARTICLE_SEARCH_INPUT;
+            session.searchScope = ProductSearchScope.RESERVE;
+            sendArticleSearchPrompt(chatId);
+            answerCallback(callback, "");
+            return;
+        }
+        if (CB_SEARCH_UNRESERVE.equals(data)) {
+            session.state = AdminState.ARTICLE_SEARCH_INPUT;
+            session.searchScope = ProductSearchScope.UNRESERVE;
+            sendArticleSearchPrompt(chatId);
+            answerCallback(callback, "");
+            return;
+        }
+        if (CB_SEARCH_SOLD.equals(data)) {
+            session.state = AdminState.ARTICLE_SEARCH_INPUT;
+            session.searchScope = ProductSearchScope.SOLD;
+            sendArticleSearchPrompt(chatId);
+            answerCallback(callback, "");
+            return;
+        }
+        if (CB_SEARCH_MANUAL.equals(data)) {
+            session.state = AdminState.ARTICLE_SEARCH_INPUT;
+            session.searchScope = ProductSearchScope.MANUAL;
+            sendArticleSearchPrompt(chatId);
+            answerCallback(callback, "");
+            return;
+        }
 
         if (data.startsWith("PAGE:")) {
             String[] parts = data.split(":");
@@ -448,6 +488,20 @@ public class ShopifyBot extends TelegramLongPollingBot {
             db.addAdmin(newAdminId, "", user.getId());
             resetSession(session);
             sendWelcomeMenu(chatId, "✅ Админ добавлен: " + newAdminId);
+            return;
+        }
+
+        if (session.state == AdminState.ARTICLE_SEARCH_INPUT) {
+            String article = text.replaceAll("\\D", "");
+            if (!article.matches("\\d{8}")) {
+                sendText(chatId,
+                        "Введите артикул из 8 цифр (например: 56789356).",
+                        inlineSingleColumn(
+                                button("Отменить", CB_CANCEL_FLOW)
+                        ));
+                return;
+            }
+            processArticleSearch(chatId, session, article);
             return;
         }
 
@@ -785,6 +839,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         appendPaginationRows(rows, "PRODUCTS", safePage, pages);
+        rows.add(List.of(button("🔎 Поиск по артиклу", CB_SEARCH_PRODUCTS)));
         rows.add(List.of(button("⬅ Назад в меню", CB_MENU)));
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         markup.setKeyboard(rows);
@@ -880,6 +935,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 : "SOLD";
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         appendPaginationRows(rows, scope, safePage, pages);
+        rows.add(List.of(button("🔎 Поиск по артиклу", searchCallbackForScope(scope))));
         rows.add(List.of(button("⬅ Назад в меню", CB_MENU)));
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         markup.setKeyboard(rows);
@@ -897,19 +953,95 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
     }
 
+    private String searchCallbackForScope(String scope) {
+        if ("RESERVE".equals(scope)) return CB_SEARCH_RESERVE;
+        if ("UNRESERVE".equals(scope)) return CB_SEARCH_UNRESERVE;
+        if ("MANUAL".equals(scope)) return CB_SEARCH_MANUAL;
+        if ("SOLD".equals(scope)) return CB_SEARCH_SOLD;
+        return CB_SEARCH_PRODUCTS;
+    }
+
+    private void sendArticleSearchPrompt(long chatId) {
+        sendText(chatId,
+                "🔎 Введите артикул (8 цифр), например: 56789356",
+                inlineSingleColumn(
+                        button("Отменить", CB_CANCEL_FLOW)
+                ));
+    }
+
+    private void processArticleSearch(long chatId, AdminSession session, String article) {
+        ProductSearchScope scope = session.searchScope == null ? ProductSearchScope.PRODUCTS : session.searchScope;
+        Database.ProductCard card;
+        Integer ordinal;
+        switch (scope) {
+            case UNRESERVE:
+                card = db.findReservedProductByArticle(article);
+                if (card == null) {
+                    sendText(chatId, "По этому артикулу нет товара в резерве.");
+                    return;
+                }
+                ordinal = db.findReservedOrdinalByProductId(card.productId);
+                session.state = AdminState.UNRESERVE_SELECT;
+                break;
+            case RESERVE:
+                card = db.findVisibleProductByArticle(article);
+                if (card == null) {
+                    sendText(chatId, "Товар с таким артикулом не найден среди активных.");
+                    return;
+                }
+                ordinal = db.findVisibleOrdinalByProductId(card.productId);
+                session.state = AdminState.RESERVE_SELECT;
+                break;
+            case SOLD:
+                card = db.findVisibleProductByArticle(article);
+                if (card == null) {
+                    sendText(chatId, "Товар с таким артикулом не найден среди активных.");
+                    return;
+                }
+                ordinal = db.findVisibleOrdinalByProductId(card.productId);
+                session.state = AdminState.SOLD_SELECT;
+                break;
+            case MANUAL:
+                card = db.findVisibleProductByArticle(article);
+                if (card == null) {
+                    sendText(chatId, "Товар с таким артикулом не найден среди активных.");
+                    return;
+                }
+                ordinal = db.findVisibleOrdinalByProductId(card.productId);
+                session.state = AdminState.MANUAL_DISCOUNT_SELECT;
+                break;
+            case PRODUCTS:
+            default:
+                card = db.findVisibleProductByArticle(article);
+                if (card == null) {
+                    sendText(chatId, "Товар с таким артикулом не найден среди активных.");
+                    return;
+                }
+                ordinal = db.findVisibleOrdinalByProductId(card.productId);
+                break;
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("✅ Найдено:\n");
+        sb.append(card.title)
+                .append(" | ")
+                .append(formatRsd(card.currentPriceRsd))
+                .append(" RSD\n");
+        sb.append("Artikal: ").append(card.article).append("\n");
+        sb.append("Статус: ").append(statusLabel(card.status));
+        if (ordinal != null && ordinal > 0) {
+            sb.append("\nНомер в списке: ").append(ordinal);
+            if (scope != ProductSearchScope.PRODUCTS) {
+                sb.append("\nВведите этот номер цифрой для действия.");
+            }
+        }
+        sendText(chatId, sb.toString());
+    }
+
     private void markCardAsSold(ProductCard card) throws IOException {
-        String soldCaption = "PRODATO\n" + buildProductCaption(
-                card.title,
-                card.size,
-                card.basePriceRsd,
-                card.currentPriceRsd,
-                card.article,
-                card.discountPercent,
-                card.fixedPriceRsd,
-                "SOLD"
-        );
         try {
-            editTelegramCaption(card.channelId, card.messageId, soldCaption);
+            editTelegramCaption(card.channelId, card.messageId, "PRODATO");
+            db.updatePostText(card.channelId, card.messageId, "PRODATO");
         } catch (Exception e) {
             log.warn("Failed to put PRODATO caption for product {}", card.productId, e);
         }
@@ -920,7 +1052,6 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
         db.markProductStatus(card.productId, "SOLD");
         db.deleteProductCard(card.productId);
-        deleteTelegramByReference(card.channelId, card.messageId, card.mediaGroupId);
     }
 
     private void syncCardState(ProductCard card, String status, int discountPercent, Double fixedPriceRsd, double currentPriceRsd) throws IOException {
@@ -1196,6 +1327,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         session.state = AdminState.IDLE;
         session.pendingPhotoFileIds.clear();
         session.selectedProductId = 0;
+        session.searchScope = null;
     }
 
     private void syncDiscountsSafe() {
@@ -1390,6 +1522,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         ADD_PRODUCT_PHOTOS,
         ADD_PRODUCT_DESCRIPTION,
         ADD_ADMIN_ID,
+        ARTICLE_SEARCH_INPUT,
         RESERVE_SELECT,
         UNRESERVE_SELECT,
         SOLD_SELECT,
@@ -1397,10 +1530,19 @@ public class ShopifyBot extends TelegramLongPollingBot {
         MANUAL_DISCOUNT_INPUT
     }
 
+    private enum ProductSearchScope {
+        PRODUCTS,
+        RESERVE,
+        UNRESERVE,
+        SOLD,
+        MANUAL
+    }
+
     private static class AdminSession {
         AdminState state = AdminState.IDLE;
         final List<String> pendingPhotoFileIds = new ArrayList<>();
         long selectedProductId = 0;
+        ProductSearchScope searchScope;
     }
 
     private void handleMessage(Message message, boolean isEdit) {

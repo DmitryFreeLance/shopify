@@ -2151,8 +2151,15 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 return;
             }
             if (session.state == AdminState.UNRESERVE_SELECT) {
-                syncCardState(card, "ACTIVE", card.discountPercent, card.fixedPriceRsd, card.currentPriceRsd);
-                sendText(chatId, "✅ Резерв снят: " + card.title + " (Artikal: " + card.article + ")");
+                DiscountTarget target = calculateDiscountTarget(card, todayInDiscountZone());
+                if (target == null) {
+                    syncCardState(card, "ACTIVE", card.discountPercent, card.fixedPriceRsd, card.currentPriceRsd);
+                } else {
+                    syncCardState(card, "ACTIVE", target.discountPercent, target.fixedPriceRsd, target.currentPriceRsd);
+                }
+                ProductCard refreshed = db.findProductCardById(card.productId);
+                String finalPrice = refreshed == null ? formatRsd(card.currentPriceRsd) : formatRsd(refreshed.currentPriceRsd);
+                sendText(chatId, "✅ Резерв снят: " + card.title + " (Artikal: " + card.article + ")\nАктуальная цена: " + finalPrice + " RSD");
                 sendSelectableProductsPage(chatId, session, 0);
                 return;
             }

@@ -632,7 +632,7 @@ public class Database {
     }
 
     public List<ProductCard> listProductsForDiscount() {
-        return listProductsByStatuses(5000, 0, "status IN ('ACTIVE','RESERVED')");
+        return listProductsByStatuses(5000, 0, "status='ACTIVE'");
     }
 
     private List<ProductCard> listProductsByStatuses(int limit, int offset, String whereClause) {

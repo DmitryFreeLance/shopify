@@ -73,6 +73,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private static final String CB_SOLD = "OPEN:SOLD";
     private static final String CB_USERS = "OPEN:USERS";
     private static final String CB_ADD_ADMIN = "OPEN:ADD_ADMIN";
+    private static final String CB_ADD_MENU = "OPEN:ADD_MENU";
     private static final String CB_DISCOUNTS = "OPEN:DISCOUNTS";
     private static final String CB_DISCOUNTS_DISABLE = "DISCOUNT:DISABLE";
     private static final String CB_DISCOUNTS_ENABLE = "DISCOUNT:ENABLE";
@@ -81,6 +82,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private static final String CB_BACK_TO_PHOTOS = "FLOW:BACK_TO_PHOTOS";
     private static final String CB_CANCEL_FLOW = "FLOW:CANCEL";
     private static final String META_DISCOUNT_ENABLED = "discount:enabled";
+    private static final String META_DISCOUNT_RESET_START = "discount:reset_start_date";
 
     private final Config config;
     private final Database db;
@@ -217,6 +219,12 @@ public class ShopifyBot extends TelegramLongPollingBot {
             answerCallback(callback, "");
             return;
         }
+        if (CB_ADD_MENU.equals(data)) {
+            resetSession(session);
+            sendAddMenu(chatId);
+            answerCallback(callback, "");
+            return;
+        }
         if (CB_PRODUCTS.equals(data)) {
             resetSession(session);
             sendProductsPage(chatId, 0);
@@ -275,8 +283,10 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
         if (CB_DISCOUNTS_ENABLE.equals(data)) {
             db.setMeta(META_DISCOUNT_ENABLED, "true");
+            String today = todayInDiscountZone().toString();
+            db.setMeta(META_DISCOUNT_RESET_START, today);
             db.setMeta("discount:last_sync_date", "");
-            sendDiscountsDashboard(chatId, "▶️ Прогрессивные скидки включены.");
+            sendDiscountsDashboard(chatId, "▶️ Прогрессивные скидки включены.\nДля новых товаров цикл начинается с дня 1 (0%).");
             answerCallback(callback, "Скидки включены");
             return;
         }
@@ -376,6 +386,16 @@ public class ShopifyBot extends TelegramLongPollingBot {
         if ("/start".equalsIgnoreCase(text) || "/menu".equalsIgnoreCase(text)) {
             resetSession(session);
             sendWelcomeMenu(chatId);
+            return;
+        }
+        if ("/add".equalsIgnoreCase(text)) {
+            resetSession(session);
+            sendAddMenu(chatId);
+            return;
+        }
+        if ("/discounts".equalsIgnoreCase(text)) {
+            resetSession(session);
+            sendDiscountsDashboard(chatId);
             return;
         }
         if ("/cancel".equalsIgnoreCase(text)) {
@@ -741,7 +761,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         appendPaginationRows(rows, "PRODUCTS", safePage, pages);
-        rows.add(List.of(button("⬅ Назад в меню", CB_MENU)));
+        rows.add(List.of(button("⬅ Назад", CB_ADD_MENU)));
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         markup.setKeyboard(rows);
         sendText(chatId, sb.toString(), markup);
@@ -980,11 +1000,22 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private void sendWelcomeMenu(long chatId, String status) {
         StringBuilder text = new StringBuilder();
         text.append("✨ Панель управления SecondHand Ogledalo\n");
-        text.append("Выберите действие из меню ниже:");
+        text.append("Выберите действие из меню ниже.\n");
+        text.append("Команды: /discounts и /add");
         if (status != null && !status.isBlank()) {
             text.append("\n\n").append(status);
         }
         sendText(chatId, text.toString(), buildMainInlineKeyboard());
+    }
+
+    private void sendAddMenu(long chatId) {
+        sendText(chatId,
+                "🛠 Управление доступом\nВыберите действие:",
+                inlineSingleColumn(
+                        button("👥 Список пользователей", CB_USERS),
+                        button("🛡 Добавить админа", CB_ADD_ADMIN),
+                        button("⬅ Назад в меню", CB_MENU)
+                ));
     }
 
     private void sendDiscountsDashboard(long chatId) {
@@ -1026,7 +1057,26 @@ public class ShopifyBot extends TelegramLongPollingBot {
         return !"false".equalsIgnoreCase(value.trim());
     }
 
+    private LocalDate todayInDiscountZone() {
+        return LocalDate.now(discountZone == null ? ZoneId.systemDefault() : discountZone);
+    }
+
+    private LocalDate getDiscountResetStartDate() {
+        String raw = db.getMeta(META_DISCOUNT_RESET_START);
+        if (raw == null || raw.isBlank()) return null;
+        try {
+            return LocalDate.parse(raw.trim());
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     private String describeDiscountStage(LocalDate today) {
+        LocalDate resetStart = getDiscountResetStartDate();
+        if (resetStart != null && !today.isBefore(resetStart)) {
+            long resetDays = Math.max(0, java.time.temporal.ChronoUnit.DAYS.between(resetStart, today));
+            if (resetDays < 7) return "цикл после включения: неделя без скидок";
+        }
         LocalDate monthEnd = YearMonth.from(today).atEndOfMonth();
         LocalDate lastWeekStart = monthEnd.with(java.time.temporal.TemporalAdjusters.previousOrSame(java.time.DayOfWeek.MONDAY));
         if (today.isBefore(lastWeekStart)) {
@@ -1083,11 +1133,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 button("📦 Список товаров", CB_PRODUCTS),
                 button("🟡 Зарезервировать", CB_RESERVE),
                 button("🟢 Снять резерв", CB_UNRESERVE),
-                button("✅ Продано", CB_SOLD),
-                button("🧾 Скидки", CB_DISCOUNTS),
-                button("🏷 Скидка на товар", CB_MANUAL_DISCOUNT),
-                button("👥 Список пользователей", CB_USERS),
-                button("🛡 Добавить админа", CB_ADD_ADMIN)
+                button("✅ Продано", CB_SOLD)
         );
     }
 
@@ -1181,7 +1227,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         if (!isDiscountsEnabled()) {
             return;
         }
-        LocalDate today = LocalDate.now(discountZone == null ? ZoneId.systemDefault() : discountZone);
+        LocalDate today = todayInDiscountZone();
         String key = "discount:last_sync_date";
         String lastDate = db.getMeta(key);
         if (today.toString().equals(lastDate)) {
@@ -1221,10 +1267,21 @@ public class ShopifyBot extends TelegramLongPollingBot {
             return new DiscountTarget(discountPercentByFixed(card.basePriceRsd, 350.0), 350.0, 350.0);
         }
 
-        LocalDate createdAt = Instant.ofEpochSecond(card.createdAt)
+        LocalDate createdAtDate = Instant.ofEpochSecond(card.createdAt)
                 .atZone(discountZone == null ? ZoneId.systemDefault() : discountZone)
                 .toLocalDate();
-        long ageDays = Math.max(0, java.time.temporal.ChronoUnit.DAYS.between(createdAt, today));
+        LocalDate resetStart = getDiscountResetStartDate();
+        boolean hadDiscountBeforeReset = resetStart != null
+                && createdAtDate.isBefore(resetStart)
+                && (card.fixedPriceRsd != null || card.discountPercent > 0);
+        if (hadDiscountBeforeReset) {
+            return new DiscountTarget(card.discountPercent, card.currentPriceRsd, card.fixedPriceRsd);
+        }
+        LocalDate ageStart = createdAtDate;
+        if (resetStart != null && resetStart.isAfter(ageStart) && (card.fixedPriceRsd == null && card.discountPercent <= 0)) {
+            ageStart = resetStart;
+        }
+        long ageDays = Math.max(0, java.time.temporal.ChronoUnit.DAYS.between(ageStart, today));
         int ageWeeks = (int) (ageDays / 7L);
         int discount = ageWeeks <= 0 ? 0 : ageWeeks == 1 ? 15 : ageWeeks == 2 ? 30 : 50;
 
@@ -1233,7 +1290,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
 
         LocalDate monthEnd = ym.atEndOfMonth();
         LocalDate lastWeekStart = monthEnd.with(java.time.temporal.TemporalAdjusters.previousOrSame(java.time.DayOfWeek.MONDAY));
-        if (!today.isBefore(lastWeekStart)) {
+        boolean firstResetWeek = resetStart != null && !today.isBefore(resetStart) && ageDays < 7;
+        if (!today.isBefore(lastWeekStart) && !firstResetWeek) {
             int dow = today.getDayOfWeek().getValue(); // Mon=1
             if (dow == 5) {
                 fixed = 500.0;

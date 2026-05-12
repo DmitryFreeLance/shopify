@@ -2097,6 +2097,12 @@ public class ShopifyBot extends TelegramLongPollingBot {
                     db.deleteProductCard(ref.productId);
                     log.info("Product missing in Shopify, deleted Telegram message(s). productId={}", ref.productId);
                 } else if (availability == ShopifyClient.ProductAvailability.OUT_OF_STOCK) {
+                    try {
+                        shopify.deleteProduct(ref.productId);
+                        log.info("Product {} deleted in Shopify after reaching 0 stock", ref.productId);
+                    } catch (Exception e) {
+                        log.warn("Failed to delete out-of-stock product {} in Shopify", ref.productId, e);
+                    }
                     deleteTelegramByReference(ref.channelId, ref.messageId, ref.mediaGroupId);
                     db.markProductStatus(ref.productId, "OUT_OF_STOCK");
                     db.deleteProductCard(ref.productId);

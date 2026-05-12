@@ -98,6 +98,8 @@ public class ShopifyClient {
             // Keep unique second-hand items tracked in inventory, so POS sale can drive auto-removal.
             variant.put("inventory_management", "shopify");
             variant.put("inventory_policy", "deny");
+            // One unique item per listing.
+            variant.put("inventory_quantity", 1);
             if (payload.barcode != null && !payload.barcode.isBlank()) {
                 variant.put("barcode", payload.barcode);
             }
@@ -111,6 +113,8 @@ public class ShopifyClient {
             // Keep unique second-hand items tracked in inventory, so POS sale can drive auto-removal.
             variant.put("inventory_management", "shopify");
             variant.put("inventory_policy", "deny");
+            // One unique item per listing.
+            variant.put("inventory_quantity", 1);
             if (payload.barcode != null && !payload.barcode.isBlank()) {
                 variant.put("barcode", payload.barcode);
             }

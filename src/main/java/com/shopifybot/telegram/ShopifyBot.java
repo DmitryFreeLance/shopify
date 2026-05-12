@@ -5,7 +5,9 @@ import com.shopifybot.ai.CategorySelection;
 import com.shopifybot.ai.Classification;
 import com.shopifybot.ai.KieAiClient;
 import com.shopifybot.db.Database;
+import com.shopifybot.db.Database.ProductCard;
 import com.shopifybot.db.Database.PostRef;
+import com.shopifybot.db.Database.UserRecord;
 import com.shopifybot.shopify.ShopifyClient;
 import com.shopifybot.shopify.ShopifyCollections;
 import com.shopifybot.shopify.ShopifyProductSnapshot;
@@ -14,24 +16,47 @@ import com.shopifybot.shopify.TokenProvider;
 import com.shopifybot.util.TextParser;
 import okhttp3.OkHttpClient;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
+import org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery;
+import org.telegram.telegrambots.meta.api.methods.send.SendMediaGroup;
+import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
+import org.telegram.telegrambots.meta.api.methods.send.SendPhoto;
 import org.telegram.telegrambots.meta.api.methods.updatingmessages.DeleteMessage;
+import org.telegram.telegrambots.meta.api.methods.updatingmessages.EditMessageCaption;
 import org.telegram.telegrambots.meta.api.methods.GetFile;
+import org.telegram.telegrambots.meta.api.objects.CallbackQuery;
+import org.telegram.telegrambots.meta.api.objects.InputFile;
 import org.telegram.telegrambots.meta.api.objects.Message;
 import org.telegram.telegrambots.meta.api.objects.PhotoSize;
 import org.telegram.telegrambots.meta.api.objects.Update;
+import org.telegram.telegrambots.meta.api.objects.User;
+import org.telegram.telegrambots.meta.api.objects.media.InputMedia;
+import org.telegram.telegrambots.meta.api.objects.media.InputMediaPhoto;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.ReplyKeyboardMarkup;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.KeyboardRow;
+import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.YearMonth;
+import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -41,15 +66,26 @@ import java.util.regex.Pattern;
 
 public class ShopifyBot extends TelegramLongPollingBot {
     private static final Logger log = LoggerFactory.getLogger(ShopifyBot.class);
+    private static final String BTN_ADD_PRODUCT = "Добавить товар";
+    private static final String BTN_LIST_PRODUCTS = "Список товаров";
+    private static final String BTN_RESERVE = "Зарезервировать";
+    private static final String BTN_UNRESERVE = "Снять резерв";
+    private static final String BTN_MARK_SOLD = "Продано";
+    private static final String BTN_USERS = "Список пользователей";
+    private static final String BTN_ADD_ADMIN = "Добавить админа";
+    private static final String BTN_DONE = "Готово";
+
     private final Config config;
     private final Database db;
     private final ShopifyClient shopify;
     private final ShopifyCollections collections;
     private final KieAiClient kie;
     private String shopCurrency;
+    private ZoneId discountZone;
 
     private final ExecutorService workers = Executors.newFixedThreadPool(2);
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+    private final Map<Long, AdminSession> sessions = new ConcurrentHashMap<>();
 
     public ShopifyBot(Config config, Database db, OkHttpClient http, TokenProvider tokenProvider) {
         super(config.telegramBotToken);
@@ -61,24 +97,36 @@ public class ShopifyBot extends TelegramLongPollingBot {
 
         scheduler.scheduleWithFixedDelay(this::processReadyMediaGroups, 15, 15, TimeUnit.SECONDS);
         scheduler.scheduleWithFixedDelay(this::syncDeletedProducts, config.productSyncSeconds, config.productSyncSeconds, TimeUnit.SECONDS);
+        scheduler.scheduleWithFixedDelay(this::syncDiscountsSafe, 60, Math.max(300, config.discountSyncSeconds), TimeUnit.SECONDS);
     }
 
     public void initialize() {
         try {
             collections.ensureCollections();
+            discountZone = ZoneId.of(config.discountTimezone);
             shopCurrency = shopify.getShopCurrency();
             if (shopCurrency == null || shopCurrency.isBlank()) {
                 shopCurrency = "UNKNOWN";
             }
+            for (Long adminId : config.adminUserIds) {
+                db.addAdmin(adminId, "", null);
+            }
             log.info("Shop currency detected: {}", shopCurrency);
+            log.info("Admins loaded: {}", config.adminUserIds.size());
             log.info("Collections ensured");
         } catch (IOException e) {
             throw new RuntimeException("Failed to ensure Shopify collections", e);
+        } catch (Exception e) {
+            throw new RuntimeException("Initialization failed", e);
         }
     }
 
     @Override
     public void onUpdateReceived(Update update) {
+        if (update.hasCallbackQuery()) {
+            handleCallback(update.getCallbackQuery());
+            return;
+        }
         log.info(
                 "Update received: message={}, edited_message={}, channel_post={}, edited_channel_post={}, my_chat_member={}, chat_member={}",
                 update.hasMessage(),
@@ -89,23 +137,952 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 update.hasChatMember()
         );
         if (update.hasChannelPost()) {
-            handleMessage(update.getChannelPost(), false);
+            handleIncomingMessage(update.getChannelPost(), false);
         }
         if (update.hasEditedChannelPost()) {
-            handleMessage(update.getEditedChannelPost(), true);
+            handleIncomingMessage(update.getEditedChannelPost(), true);
         }
         if (update.hasMessage()) {
-            handleMessage(update.getMessage(), false);
+            handleIncomingMessage(update.getMessage(), false);
         }
         if (update.hasEditedMessage()) {
-            handleMessage(update.getEditedMessage(), true);
+            handleIncomingMessage(update.getEditedMessage(), true);
         }
+    }
+
+    private void handleIncomingMessage(Message message, boolean isEdit) {
+        User user = message.getFrom();
+        if (user != null) {
+            boolean isAdmin = db.isAdmin(user.getId());
+            db.upsertUser(
+                    user.getId(),
+                    user.getUserName(),
+                    user.getFirstName(),
+                    user.getLastName(),
+                    isAdmin
+            );
+        }
+
+        if (message.getChat() != null && "private".equalsIgnoreCase(message.getChat().getType())) {
+            if (isEdit) {
+                return;
+            }
+            handlePrivateAdminMessage(message);
+            return;
+        }
+
+        handleMessage(message, isEdit);
+    }
+
+    private void handleCallback(CallbackQuery callback) {
+        if (callback == null || callback.getMessage() == null || callback.getData() == null) {
+            return;
+        }
+        User user = callback.getFrom();
+        if (user == null || !db.isAdmin(user.getId())) {
+            answerCallback(callback, "Доступ только для админов");
+            return;
+        }
+        String[] parts = callback.getData().split(":");
+        if (parts.length != 3 || !"PAGE".equals(parts[0])) {
+            answerCallback(callback, "");
+            return;
+        }
+        int page;
+        try {
+            page = Integer.parseInt(parts[2]);
+        } catch (NumberFormatException e) {
+            answerCallback(callback, "Некорректная страница");
+            return;
+        }
+
+        long chatId = callback.getMessage().getChatId();
+        AdminSession session = sessionFor(user.getId());
+        switch (parts[1]) {
+            case "PRODUCTS":
+                sendProductsPage(chatId, page);
+                break;
+            case "USERS":
+                sendUsersPage(chatId, page);
+                break;
+            case "RESERVE":
+                session.state = AdminState.RESERVE_SELECT;
+                sendSelectableProductsPage(chatId, session, page);
+                break;
+            case "UNRESERVE":
+                session.state = AdminState.UNRESERVE_SELECT;
+                sendSelectableProductsPage(chatId, session, page);
+                break;
+            case "SOLD":
+                session.state = AdminState.SOLD_SELECT;
+                sendSelectableProductsPage(chatId, session, page);
+                break;
+            default:
+                break;
+        }
+        answerCallback(callback, "");
+    }
+
+    private void handlePrivateAdminMessage(Message message) {
+        User user = message.getFrom();
+        if (user == null) return;
+        long chatId = message.getChatId();
+        boolean isAdmin = db.isAdmin(user.getId());
+        db.upsertUser(user.getId(), user.getUserName(), user.getFirstName(), user.getLastName(), isAdmin);
+
+        if (!isAdmin) {
+            sendText(chatId, "Доступ только для администраторов.");
+            return;
+        }
+
+        AdminSession session = sessionFor(user.getId());
+        String text = extractText(message).trim();
+
+        if ("/start".equalsIgnoreCase(text) || "/menu".equalsIgnoreCase(text)) {
+            resetSession(session);
+            sendMenu(chatId, "Админ-меню готово.", session);
+            return;
+        }
+        if ("/cancel".equalsIgnoreCase(text)) {
+            resetSession(session);
+            sendMenu(chatId, "Текущая операция отменена.", session);
+            return;
+        }
+
+        if (session.state == AdminState.ADD_PRODUCT_PHOTOS) {
+            if (message.getPhoto() != null && !message.getPhoto().isEmpty()) {
+                if (session.pendingPhotoFileIds.size() >= 9) {
+                    sendMenu(chatId, "Лимит: максимум 9 фото. Нажмите \"Готово\" или /cancel.", session);
+                    return;
+                }
+                PhotoSize best = selectBestPhoto(message.getPhoto());
+                session.pendingPhotoFileIds.add(best.getFileId());
+                sendMenu(chatId, "Фото добавлено: " + session.pendingPhotoFileIds.size() + "/9. Добавьте еще или нажмите \"Готово\".", session);
+                return;
+            }
+            if (BTN_DONE.equalsIgnoreCase(text)) {
+                if (session.pendingPhotoFileIds.isEmpty()) {
+                    sendMenu(chatId, "Сначала добавьте хотя бы одно фото.", session);
+                    return;
+                }
+                session.state = AdminState.ADD_PRODUCT_DESCRIPTION;
+                sendMenu(chatId,
+                        "Теперь отправьте описание товара.\n\nПример:\nAdidas\nVel - ženski S\nCena - 1500 RSD\nArtikal: 56789356",
+                        session);
+                return;
+            }
+            sendMenu(chatId, "Ожидаю фото или кнопку \"Готово\".", session);
+            return;
+        }
+
+        if (session.state == AdminState.ADD_PRODUCT_DESCRIPTION) {
+            if (text.isBlank()) {
+                sendMenu(chatId, "Описание пустое. Отправьте текст описания.", session);
+                return;
+            }
+            createProductFromAdminInput(chatId, user.getId(), session, text);
+            return;
+        }
+
+        if (session.state == AdminState.ADD_ADMIN_ID) {
+            long newAdminId;
+            try {
+                newAdminId = Long.parseLong(text);
+            } catch (NumberFormatException e) {
+                sendMenu(chatId, "Введите числовой Telegram ID (например: 123456789).", session);
+                return;
+            }
+            db.addAdmin(newAdminId, "", user.getId());
+            resetSession(session);
+            sendMenu(chatId, "Админ добавлен: " + newAdminId, session);
+            return;
+        }
+
+        if (session.state == AdminState.RESERVE_SELECT || session.state == AdminState.UNRESERVE_SELECT || session.state == AdminState.SOLD_SELECT) {
+            int ordinal;
+            try {
+                ordinal = Integer.parseInt(text);
+            } catch (NumberFormatException e) {
+                sendMenu(chatId, "Введите номер позиции цифрой.", session);
+                return;
+            }
+            processSelectionByOrdinal(chatId, session, ordinal);
+            return;
+        }
+
+        if (BTN_ADD_PRODUCT.equalsIgnoreCase(text)) {
+            resetSession(session);
+            session.state = AdminState.ADD_PRODUCT_PHOTOS;
+            sendMenu(chatId, "Отправьте до 9 фото товара, затем нажмите \"Готово\".", session);
+            return;
+        }
+        if (BTN_LIST_PRODUCTS.equalsIgnoreCase(text)) {
+            sendProductsPage(chatId, 0);
+            return;
+        }
+        if (BTN_RESERVE.equalsIgnoreCase(text)) {
+            resetSession(session);
+            session.state = AdminState.RESERVE_SELECT;
+            sendSelectableProductsPage(chatId, session, 0);
+            return;
+        }
+        if (BTN_UNRESERVE.equalsIgnoreCase(text)) {
+            resetSession(session);
+            session.state = AdminState.UNRESERVE_SELECT;
+            sendSelectableProductsPage(chatId, session, 0);
+            return;
+        }
+        if (BTN_MARK_SOLD.equalsIgnoreCase(text)) {
+            resetSession(session);
+            session.state = AdminState.SOLD_SELECT;
+            sendSelectableProductsPage(chatId, session, 0);
+            return;
+        }
+        if (BTN_USERS.equalsIgnoreCase(text)) {
+            sendUsersPage(chatId, 0);
+            return;
+        }
+        if (BTN_ADD_ADMIN.equalsIgnoreCase(text)) {
+            resetSession(session);
+            session.state = AdminState.ADD_ADMIN_ID;
+            sendMenu(chatId, "Введите Telegram ID пользователя, которого нужно сделать админом.", session);
+            return;
+        }
+
+        sendMenu(chatId, "Выберите действие из меню.", session);
+    }
+
+    private void createProductFromAdminInput(long chatId, long adminUserId, AdminSession session, String rawDescription) {
+        String article = TextParser.extractArticle(rawDescription);
+        if (article == null || !article.matches("\\d{8}")) {
+            sendMenu(chatId, "Не найден корректный артикул (8 цифр). Пример: Artikal: 56789356", session);
+            return;
+        }
+        if (db.existsActiveArticle(article)) {
+            sendMenu(chatId, "Этот артикул уже используется в активном товаре. Укажите другой.", session);
+            return;
+        }
+
+        String rsd = TextParser.extractRsd(rawDescription);
+        if (rsd == null || rsd.isBlank()) {
+            sendMenu(chatId, "Не удалось прочитать цену. Укажите строку вида: Cena - 1500 RSD", session);
+            return;
+        }
+
+        double basePrice;
+        try {
+            basePrice = Double.parseDouble(rsd);
+        } catch (NumberFormatException e) {
+            sendMenu(chatId, "Цена имеет неверный формат. Проверьте строку Cena.", session);
+            return;
+        }
+        if (basePrice <= 0) {
+            sendMenu(chatId, "Цена должна быть больше 0.", session);
+            return;
+        }
+
+        String title = TextParser.extractTitle(rawDescription);
+        if (title == null || title.isBlank()) {
+            String[] lines = TextParser.normalizeNewlines(rawDescription).split("\\n");
+            for (String line : lines) {
+                if (!line.trim().isBlank()) {
+                    title = line.trim();
+                    break;
+                }
+            }
+        }
+        if (title == null || title.isBlank()) {
+            sendMenu(chatId, "Не удалось определить название товара. Добавьте его в первую строку.", session);
+            return;
+        }
+        String size = TextParser.extractSize(rawDescription);
+
+        if (session.pendingPhotoFileIds.isEmpty()) {
+            sendMenu(chatId, "Фото не найдены, начните добавление товара заново.", session);
+            resetSession(session);
+            return;
+        }
+        List<String> photoFileIds = new ArrayList<>(session.pendingPhotoFileIds);
+        resetSession(session);
+        sendMenu(chatId, "Публикую товар, подождите 3-10 секунд...", session);
+
+        final String finalTitle = title;
+        final String finalSize = size;
+        workers.submit(() -> {
+            List<byte[]> images = new ArrayList<>();
+            for (String fileId : photoFileIds) {
+                try {
+                    images.add(downloadFileBytes(fileId));
+                } catch (Exception e) {
+                    log.warn("Failed to download photo {} for admin product flow", fileId, e);
+                }
+            }
+            if (images.isEmpty()) {
+                sendMenu(chatId, "Не удалось загрузить фото. Попробуйте добавить товар еще раз.", sessionFor(adminUserId));
+                return;
+            }
+
+            CategorySelection explicit = TextParser.detectExplicitCategories(rawDescription);
+            if (explicit.entries.isEmpty()) {
+                explicit.add("Muško", null);
+            }
+            String caption = buildProductCaption(finalTitle, finalSize, basePrice, basePrice, article, 0, null, "ACTIVE");
+
+            long productId = 0;
+            try {
+                ShopifyClient.ProductPayload payload = new ShopifyClient.ProductPayload();
+                payload.title = finalTitle;
+                payload.bodyHtml = caption.replace("\n", "<br>");
+                payload.priceEur = formatPriceForShopify(basePrice);
+                payload.size = finalSize;
+                payload.tags = buildTags(explicit, new Classification());
+                payload.productType = selectProductType(explicit);
+                payload.images = images;
+                payload.barcode = article;
+                payload.sku = article;
+
+                productId = shopify.createProduct(payload);
+                if (config.shopifyPublishAll) {
+                    try {
+                        shopify.publishProductToAll(productId);
+                    } catch (Exception e) {
+                        log.warn("Failed to publish product {} to channels", productId, e);
+                    }
+                }
+                for (CategorySelection.Entry entry : explicit.entries) {
+                    for (String titleKey : collections.buildCollectionTitles(entry.section, entry.subcategory)) {
+                        Long id = collections.getCollectionId(titleKey);
+                        if (id != null) {
+                            try {
+                                shopify.addProductToCollection(productId, id);
+                            } catch (Exception e) {
+                                log.warn("Failed to add product {} to collection {}", productId, titleKey, e);
+                            }
+                        }
+                    }
+                }
+
+                PublishResult pub = publishToListingChat(caption, images);
+                String telegramLink = buildTelegramLink(pub.channelId, pub.primaryMessageId);
+                if (telegramLink != null && !telegramLink.isBlank()) {
+                    try {
+                        shopify.setProductMetafield(productId,
+                                config.telegramLinkMetafieldNamespace,
+                                config.telegramLinkMetafieldKey,
+                                telegramLink,
+                                config.telegramLinkMetafieldType);
+                    } catch (Exception e) {
+                        log.warn("Failed to set telegram link metafield for product {}", productId, e);
+                    }
+                }
+
+                for (Message sent : pub.messages) {
+                    String msgText = sent.getCaption() == null ? "" : sent.getCaption();
+                    long sentDate = sent.getDate() == null ? Instant.now().getEpochSecond() : sent.getDate();
+                    db.upsertPost(pub.channelId, sent.getMessageId(), pub.mediaGroupId, msgText, sentDate);
+                    db.setProductIdForMessage(pub.channelId, sent.getMessageId(), productId);
+                }
+                if (pub.mediaGroupId != null && !pub.mediaGroupId.isBlank()) {
+                    db.upsertMediaGroup(pub.mediaGroupId, pub.channelId);
+                    db.markMediaGroupProcessed(pub.mediaGroupId);
+                }
+
+                db.upsertProductCard(new ProductCard(
+                        productId,
+                        pub.channelId,
+                        pub.primaryMessageId,
+                        pub.mediaGroupId,
+                        finalTitle,
+                        finalSize,
+                        rawDescription,
+                        article,
+                        basePrice,
+                        basePrice,
+                        0,
+                        null,
+                        "ACTIVE",
+                        Instant.now().getEpochSecond(),
+                        Instant.now().getEpochSecond()
+                ));
+
+                sendMenu(chatId,
+                        "Товар опубликован.\nНазвание: " + finalTitle + "\nЦена: " + formatRsd(basePrice) + " RSD\nАртикул: " + article,
+                        sessionFor(adminUserId));
+            } catch (Exception e) {
+                log.error("Failed to create product from admin flow", e);
+                if (productId > 0) {
+                    try {
+                        shopify.deleteProduct(productId);
+                    } catch (Exception ignored) {
+                    }
+                }
+                sendMenu(chatId, "Ошибка публикации товара: " + e.getMessage(), sessionFor(adminUserId));
+            }
+        });
+    }
+
+    private PublishResult publishToListingChat(String caption, List<byte[]> images) throws TelegramApiException {
+        if (images.size() == 1) {
+            SendPhoto sendPhoto = new SendPhoto();
+            sendPhoto.setChatId(config.telegramPublishChatId);
+            if (config.telegramPublishThreadId != null && config.telegramPublishThreadId > 0) {
+                sendPhoto.setMessageThreadId(config.telegramPublishThreadId);
+            }
+            sendPhoto.setCaption(caption);
+            sendPhoto.setPhoto(new InputFile(new ByteArrayInputStream(images.get(0)), "photo-1.jpg"));
+            Message sent = execute(sendPhoto);
+            return new PublishResult(
+                    String.valueOf(sent.getChatId()),
+                    sent.getMessageId(),
+                    sent.getMediaGroupId(),
+                    List.of(sent)
+            );
+        }
+
+        SendMediaGroup mediaGroup = new SendMediaGroup();
+        mediaGroup.setChatId(config.telegramPublishChatId);
+        if (config.telegramPublishThreadId != null && config.telegramPublishThreadId > 0) {
+            mediaGroup.setMessageThreadId(config.telegramPublishThreadId);
+        }
+        List<InputMedia> media = new ArrayList<>();
+        for (int i = 0; i < images.size(); i++) {
+            InputMediaPhoto photo = new InputMediaPhoto();
+            photo.setMedia(new ByteArrayInputStream(images.get(i)), "photo-" + (i + 1) + ".jpg");
+            if (i == 0) {
+                photo.setCaption(caption);
+            }
+            media.add(photo);
+        }
+        mediaGroup.setMedias(media);
+        List<Message> sent = execute(mediaGroup);
+        Message first = sent.get(0);
+        return new PublishResult(
+                String.valueOf(first.getChatId()),
+                first.getMessageId(),
+                first.getMediaGroupId(),
+                sent
+        );
+    }
+
+    private void sendProductsPage(long chatId, int page) {
+        int pageSize = Math.max(1, config.listPageSize);
+        int total = db.countVisibleProducts();
+        int maxPage = Math.max(0, (int) Math.ceil(total / (double) pageSize) - 1);
+        int safePage = Math.max(0, Math.min(page, maxPage));
+        List<ProductCard> items = db.listVisibleProducts(pageSize, safePage * pageSize);
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("Активные товары: ").append(total).append("\n");
+        if (items.isEmpty()) {
+            sb.append("Список пуст.");
+        } else {
+            int startOrdinal = safePage * pageSize + 1;
+            for (int i = 0; i < items.size(); i++) {
+                ProductCard card = items.get(i);
+                sb.append("\n")
+                        .append(startOrdinal + i)
+                        .append(". ")
+                        .append(card.title)
+                        .append(" | ")
+                        .append(formatRsd(card.currentPriceRsd))
+                        .append(" RSD")
+                        .append(" | Artikal: ")
+                        .append(card.article)
+                        .append(" | ")
+                        .append("RESERVED".equals(card.status) ? "REZERVISANO" : "AKTIVAN");
+            }
+        }
+        sendText(chatId, sb.toString(), buildPaginationKeyboard("PRODUCTS", safePage, pageSize, total));
+    }
+
+    private void sendUsersPage(long chatId, int page) {
+        int pageSize = Math.max(1, config.listPageSize);
+        int total = db.countUsers();
+        int maxPage = Math.max(0, (int) Math.ceil(total / (double) pageSize) - 1);
+        int safePage = Math.max(0, Math.min(page, maxPage));
+        List<UserRecord> users = db.listUsers(pageSize, safePage * pageSize);
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("Пользователи: ").append(total).append("\n");
+        if (users.isEmpty()) {
+            sb.append("Список пуст.");
+        } else {
+            int startOrdinal = safePage * pageSize + 1;
+            for (int i = 0; i < users.size(); i++) {
+                UserRecord u = users.get(i);
+                String label = (u.firstName == null ? "" : u.firstName) + (u.lastName == null ? "" : (" " + u.lastName));
+                label = label.trim();
+                if (label.isBlank()) {
+                    label = u.username == null || u.username.isBlank() ? String.valueOf(u.userId) : "@" + u.username;
+                }
+                sb.append("\n")
+                        .append(startOrdinal + i)
+                        .append(". ")
+                        .append(label)
+                        .append(" (")
+                        .append(u.userId)
+                        .append(")")
+                        .append(u.admin ? " [ADMIN]" : "");
+            }
+        }
+        sendText(chatId, sb.toString(), buildPaginationKeyboard("USERS", safePage, pageSize, total));
+    }
+
+    private void sendSelectableProductsPage(long chatId, AdminSession session, int page) {
+        int pageSize = Math.max(1, config.listPageSize);
+        boolean reservedOnly = session.state == AdminState.UNRESERVE_SELECT;
+        int total = reservedOnly ? db.countReservedProducts() : db.countVisibleProducts();
+        int maxPage = Math.max(0, (int) Math.ceil(total / (double) pageSize) - 1);
+        int safePage = Math.max(0, Math.min(page, maxPage));
+        session.selectionPage = safePage;
+
+        List<ProductCard> items = reservedOnly
+                ? db.listReservedProducts(pageSize, safePage * pageSize)
+                : db.listVisibleProducts(pageSize, safePage * pageSize);
+
+        StringBuilder sb = new StringBuilder();
+        if (session.state == AdminState.RESERVE_SELECT) {
+            sb.append("Выберите товар для резерва.");
+        } else if (session.state == AdminState.UNRESERVE_SELECT) {
+            sb.append("Выберите товар для снятия резерва.");
+        } else {
+            sb.append("Выберите товар для отметки \"Продано\".");
+        }
+        sb.append("\n");
+        sb.append("Введите номер позиции из списка.\n");
+        sb.append("Всего: ").append(total).append("\n");
+
+        if (items.isEmpty()) {
+            sb.append("\nСписок пуст.");
+        } else {
+            int startOrdinal = safePage * pageSize + 1;
+            for (int i = 0; i < items.size(); i++) {
+                ProductCard card = items.get(i);
+                sb.append("\n")
+                        .append(startOrdinal + i)
+                        .append(". ")
+                        .append(card.title)
+                        .append(" | ")
+                        .append(formatRsd(card.currentPriceRsd))
+                        .append(" RSD | Artikal: ")
+                        .append(card.article);
+            }
+        }
+
+        String scope = session.state == AdminState.RESERVE_SELECT ? "RESERVE"
+                : session.state == AdminState.UNRESERVE_SELECT ? "UNRESERVE" : "SOLD";
+        sendText(chatId, sb.toString(), buildPaginationKeyboard(scope, safePage, pageSize, total));
+    }
+
+    private InlineKeyboardMarkup buildPaginationKeyboard(String scope, int page, int pageSize, int total) {
+        int pages = Math.max(1, (int) Math.ceil(total / (double) pageSize));
+        if (pages <= 1) return null;
+        List<InlineKeyboardButton> row = new ArrayList<>();
+        if (page > 0) {
+            InlineKeyboardButton prev = new InlineKeyboardButton();
+            prev.setText("⬅");
+            prev.setCallbackData("PAGE:" + scope + ":" + (page - 1));
+            row.add(prev);
+        }
+        InlineKeyboardButton center = new InlineKeyboardButton();
+        center.setText((page + 1) + "/" + pages);
+        center.setCallbackData("PAGE:" + scope + ":" + page);
+        row.add(center);
+        if (page + 1 < pages) {
+            InlineKeyboardButton next = new InlineKeyboardButton();
+            next.setText("➡");
+            next.setCallbackData("PAGE:" + scope + ":" + (page + 1));
+            row.add(next);
+        }
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        markup.setKeyboard(List.of(row));
+        return markup;
+    }
+
+    private void processSelectionByOrdinal(long chatId, AdminSession session, int ordinal) {
+        if (ordinal <= 0) {
+            sendMenu(chatId, "Номер должен быть больше 0.", session);
+            return;
+        }
+        ProductCard card;
+        if (session.state == AdminState.UNRESERVE_SELECT) {
+            card = db.findReservedProductByOrdinal(ordinal);
+        } else {
+            card = db.findVisibleProductByOrdinal(ordinal);
+        }
+        if (card == null) {
+            sendMenu(chatId, "Позиция не найдена. Проверьте номер и попробуйте снова.", session);
+            return;
+        }
+
+        try {
+            if (session.state == AdminState.RESERVE_SELECT) {
+                if ("RESERVED".equals(card.status)) {
+                    sendMenu(chatId, "Этот товар уже зарезервирован.", session);
+                    return;
+                }
+                syncCardState(card, "RESERVED", card.discountPercent, card.fixedPriceRsd, card.currentPriceRsd);
+                sendMenu(chatId, "Резерв поставлен: " + card.title + " (Artikal: " + card.article + ")", session);
+                return;
+            }
+            if (session.state == AdminState.UNRESERVE_SELECT) {
+                syncCardState(card, "ACTIVE", card.discountPercent, card.fixedPriceRsd, card.currentPriceRsd);
+                sendMenu(chatId, "Резерв снят: " + card.title + " (Artikal: " + card.article + ")", session);
+                return;
+            }
+            if (session.state == AdminState.SOLD_SELECT) {
+                markCardAsSold(card);
+                sendMenu(chatId, "Товар помечен проданным: " + card.title + " (Artikal: " + card.article + ")", session);
+            }
+        } catch (Exception e) {
+            log.warn("Failed to process selection for product {}", card.productId, e);
+            sendMenu(chatId, "Не удалось выполнить действие: " + e.getMessage(), session);
+        }
+    }
+
+    private void markCardAsSold(ProductCard card) throws IOException {
+        String soldCaption = "PRODATO\n" + buildProductCaption(
+                card.title,
+                card.size,
+                card.basePriceRsd,
+                card.currentPriceRsd,
+                card.article,
+                card.discountPercent,
+                card.fixedPriceRsd,
+                "SOLD"
+        );
+        try {
+            editTelegramCaption(card.channelId, card.messageId, soldCaption);
+        } catch (Exception e) {
+            log.warn("Failed to put PRODATO caption for product {}", card.productId, e);
+        }
+        try {
+            shopify.deleteProduct(card.productId);
+        } catch (Exception e) {
+            log.warn("Failed to delete product {} from Shopify", card.productId, e);
+        }
+        db.updateProductCardStatus(card.productId, "SOLD");
+        db.markProductStatus(card.productId, "SOLD");
+        deleteTelegramByReference(card.channelId, card.messageId, card.mediaGroupId);
+    }
+
+    private void syncCardState(ProductCard card, String status, int discountPercent, Double fixedPriceRsd, double currentPriceRsd) throws IOException {
+        ShopifyProductSnapshot snapshot = shopify.getProductSnapshot(card.productId);
+        String shopifyTitle = "RESERVED".equals(status) ? ("REZERVISANO | " + card.title) : card.title;
+        String caption = buildProductCaption(card.title, card.size, card.basePriceRsd, currentPriceRsd, card.article, discountPercent, fixedPriceRsd, status);
+        String bodyHtml = caption.replace("\n", "<br>");
+
+        shopify.updateProduct(
+                card.productId,
+                snapshot.variantId,
+                shopifyTitle,
+                bodyHtml,
+                formatPriceForShopify(currentPriceRsd),
+                card.size,
+                card.article
+        );
+        syncSaleCollection(card.productId, discountPercent > 0 || fixedPriceRsd != null);
+        try {
+            editTelegramCaption(card.channelId, card.messageId, caption);
+        } catch (TelegramApiException e) {
+            String msg = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
+            if (!msg.contains("message is not modified")) {
+                throw new IOException("Failed to edit Telegram caption", e);
+            }
+        }
+        db.updatePostText(card.channelId, card.messageId, caption);
+        db.updateProductCardPricing(card.productId, currentPriceRsd, discountPercent, fixedPriceRsd);
+        db.updateProductCardStatus(card.productId, status);
+    }
+
+    private void syncSaleCollection(long productId, boolean addToSale) {
+        Long saleCollectionId = collections.getCollectionId("Sniženje");
+        if (saleCollectionId == null) return;
+        try {
+            if (addToSale) {
+                shopify.addProductToCollection(productId, saleCollectionId);
+            } else {
+                shopify.removeProductFromCollection(saleCollectionId, productId);
+            }
+        } catch (Exception e) {
+            log.warn("Failed to sync Sniženje collection for product {}", productId, e);
+        }
+    }
+
+    private void editTelegramCaption(String channelId, long messageId, String caption) throws TelegramApiException {
+        EditMessageCaption edit = new EditMessageCaption();
+        edit.setChatId(channelId);
+        edit.setMessageId((int) messageId);
+        edit.setCaption(caption);
+        execute(edit);
+    }
+
+    private String buildProductCaption(String title,
+                                       String size,
+                                       double basePriceRsd,
+                                       double currentPriceRsd,
+                                       String article,
+                                       int discountPercent,
+                                       Double fixedPriceRsd,
+                                       String status) {
+        List<String> lines = new ArrayList<>();
+        if ("RESERVED".equals(status)) {
+            lines.add("REZERVISANO");
+        }
+        if ("SOLD".equals(status)) {
+            lines.add("PRODATO");
+        }
+        if (fixedPriceRsd != null) {
+            lines.add("SNIŽENJE " + formatRsd(basePriceRsd) + " -> " + formatRsd(fixedPriceRsd) + " RSD");
+        } else if (discountPercent > 0) {
+            lines.add("SNIŽENJE " + formatRsd(basePriceRsd) + "-" + discountPercent + "%=" + formatRsd(currentPriceRsd));
+        }
+        lines.add(title);
+        if (size != null && !size.isBlank()) {
+            lines.add("Vel - " + size);
+        }
+        lines.add("Cena - " + formatRsd(currentPriceRsd) + " RSD");
+        lines.add("Artikal: " + article);
+        return String.join("\n", lines);
+    }
+
+    private String formatPriceForShopify(double value) {
+        if (Math.abs(value - Math.round(value)) < 0.00001) {
+            return String.valueOf((long) Math.round(value));
+        }
+        return String.format(Locale.US, "%.2f", value);
+    }
+
+    private String formatRsd(double value) {
+        if (Math.abs(value - Math.round(value)) < 0.00001) {
+            return String.valueOf((long) Math.round(value));
+        }
+        return String.format(Locale.US, "%.2f", value);
+    }
+
+    private void sendMenu(long chatId, String text, AdminSession session) {
+        sendText(chatId, text, null, buildMainKeyboard(session));
+    }
+
+    private ReplyKeyboardMarkup buildMainKeyboard(AdminSession session) {
+        ReplyKeyboardMarkup keyboard = new ReplyKeyboardMarkup();
+        keyboard.setResizeKeyboard(true);
+        List<KeyboardRow> rows = new ArrayList<>();
+        rows.add(row(BTN_ADD_PRODUCT, BTN_LIST_PRODUCTS));
+        rows.add(row(BTN_RESERVE, BTN_UNRESERVE));
+        rows.add(row(BTN_MARK_SOLD));
+        rows.add(row(BTN_USERS));
+        rows.add(row(BTN_ADD_ADMIN));
+        if (session != null && session.state == AdminState.ADD_PRODUCT_PHOTOS) {
+            rows.add(row(BTN_DONE));
+        }
+        keyboard.setKeyboard(rows);
+        return keyboard;
+    }
+
+    private KeyboardRow row(String... labels) {
+        KeyboardRow row = new KeyboardRow();
+        for (String label : labels) {
+            row.add(label);
+        }
+        return row;
+    }
+
+    private void sendText(long chatId, String text) {
+        sendText(chatId, text, null, null);
+    }
+
+    private void sendText(long chatId, String text, InlineKeyboardMarkup inlineKeyboard) {
+        sendText(chatId, text, inlineKeyboard, null);
+    }
+
+    private void sendText(long chatId, String text, InlineKeyboardMarkup inlineKeyboard, ReplyKeyboardMarkup replyKeyboard) {
+        SendMessage msg = new SendMessage();
+        msg.setChatId(chatId);
+        msg.setText(text);
+        if (inlineKeyboard != null) {
+            msg.setReplyMarkup(inlineKeyboard);
+        } else if (replyKeyboard != null) {
+            msg.setReplyMarkup(replyKeyboard);
+        }
+        try {
+            execute(msg);
+        } catch (TelegramApiException e) {
+            log.warn("Failed to send message to {}: {}", chatId, e.getMessage());
+        }
+    }
+
+    private void answerCallback(CallbackQuery callback, String text) {
+        try {
+            AnswerCallbackQuery answer = new AnswerCallbackQuery();
+            answer.setCallbackQueryId(callback.getId());
+            answer.setText(text);
+            answer.setShowAlert(false);
+            execute(answer);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private AdminSession sessionFor(long userId) {
+        return sessions.computeIfAbsent(userId, k -> new AdminSession());
+    }
+
+    private void resetSession(AdminSession session) {
+        session.state = AdminState.IDLE;
+        session.pendingPhotoFileIds.clear();
+        session.selectionPage = 0;
+    }
+
+    private void syncDiscountsSafe() {
+        try {
+            syncDiscounts();
+        } catch (Exception e) {
+            log.warn("Discount sync failed", e);
+        }
+    }
+
+    private void syncDiscounts() {
+        LocalDate today = LocalDate.now(discountZone == null ? ZoneId.systemDefault() : discountZone);
+        String key = "discount:last_sync_date";
+        String lastDate = db.getMeta(key);
+        if (today.toString().equals(lastDate)) {
+            return;
+        }
+
+        List<ProductCard> cards = db.listProductsForDiscount();
+        if (cards.isEmpty()) {
+            db.setMeta(key, today.toString());
+            return;
+        }
+
+        for (ProductCard card : cards) {
+            try {
+                DiscountTarget target = calculateDiscountTarget(card, today);
+                if (target == null) continue;
+                boolean samePrice = Math.abs(card.currentPriceRsd - target.currentPriceRsd) < 0.00001;
+                boolean sameDiscount = card.discountPercent == target.discountPercent;
+                boolean sameFixed = (card.fixedPriceRsd == null && target.fixedPriceRsd == null) ||
+                        (card.fixedPriceRsd != null && target.fixedPriceRsd != null &&
+                                Math.abs(card.fixedPriceRsd - target.fixedPriceRsd) < 0.00001);
+                if (samePrice && sameDiscount && sameFixed) {
+                    continue;
+                }
+                syncCardState(card, card.status, target.discountPercent, target.fixedPriceRsd, target.currentPriceRsd);
+            } catch (Exception e) {
+                log.warn("Failed to apply discount to product {}", card.productId, e);
+            }
+        }
+        db.setMeta(key, today.toString());
+    }
+
+    private DiscountTarget calculateDiscountTarget(ProductCard card, LocalDate today) {
+        if (card.basePriceRsd <= 0) return null;
+
+        if (card.fixedPriceRsd != null && card.fixedPriceRsd <= 350.0) {
+            return new DiscountTarget(discountPercentByFixed(card.basePriceRsd, 350.0), 350.0, 350.0);
+        }
+
+        LocalDate createdAt = Instant.ofEpochSecond(card.createdAt)
+                .atZone(discountZone == null ? ZoneId.systemDefault() : discountZone)
+                .toLocalDate();
+        long ageDays = Math.max(0, java.time.temporal.ChronoUnit.DAYS.between(createdAt, today));
+        int ageWeeks = (int) (ageDays / 7L);
+        int discount = ageWeeks <= 0 ? 0 : ageWeeks == 1 ? 15 : ageWeeks == 2 ? 30 : 50;
+
+        YearMonth ym = YearMonth.from(today);
+        int lastDay = ym.lengthOfMonth();
+        int day = today.getDayOfMonth();
+        Double fixed = null;
+
+        if (day == lastDay) {
+            fixed = 350.0;
+        } else if (day == lastDay - 1) {
+            fixed = 500.0;
+        } else {
+            int weekOfMonth = ((day - 1) / 7) + 1;
+            if (weekOfMonth >= 4) {
+                int dow = today.getDayOfWeek().getValue(); // Mon=1
+                int minDiscount;
+                if (dow == 1) {
+                    minDiscount = 20;
+                } else if (dow == 2) {
+                    minDiscount = 30;
+                } else if (dow == 3) {
+                    minDiscount = 40;
+                } else {
+                    minDiscount = 50;
+                }
+                discount = Math.max(discount, minDiscount);
+            }
+        }
+
+        double price;
+        int effectiveDiscount;
+        if (fixed != null) {
+            price = fixed;
+            effectiveDiscount = discountPercentByFixed(card.basePriceRsd, fixed);
+        } else {
+            price = Math.max(1, Math.round(card.basePriceRsd * (100.0 - discount) / 100.0));
+            effectiveDiscount = discount;
+        }
+        return new DiscountTarget(effectiveDiscount, price, fixed);
+    }
+
+    private int discountPercentByFixed(double basePrice, double fixedPrice) {
+        if (basePrice <= 0) return 0;
+        return Math.max(0, (int) Math.round((1.0 - (fixedPrice / basePrice)) * 100.0));
+    }
+
+    private static class PublishResult {
+        final String channelId;
+        final long primaryMessageId;
+        final String mediaGroupId;
+        final List<Message> messages;
+
+        PublishResult(String channelId, long primaryMessageId, String mediaGroupId, List<Message> messages) {
+            this.channelId = channelId;
+            this.primaryMessageId = primaryMessageId;
+            this.mediaGroupId = mediaGroupId;
+            this.messages = messages == null ? Collections.emptyList() : messages;
+        }
+    }
+
+    private static class DiscountTarget {
+        final int discountPercent;
+        final double currentPriceRsd;
+        final Double fixedPriceRsd;
+
+        DiscountTarget(int discountPercent, double currentPriceRsd, Double fixedPriceRsd) {
+            this.discountPercent = discountPercent;
+            this.currentPriceRsd = currentPriceRsd;
+            this.fixedPriceRsd = fixedPriceRsd;
+        }
+    }
+
+    private enum AdminState {
+        IDLE,
+        ADD_PRODUCT_PHOTOS,
+        ADD_PRODUCT_DESCRIPTION,
+        ADD_ADMIN_ID,
+        RESERVE_SELECT,
+        UNRESERVE_SELECT,
+        SOLD_SELECT
+    }
+
+    private static class AdminSession {
+        AdminState state = AdminState.IDLE;
+        final List<String> pendingPhotoFileIds = new ArrayList<>();
+        int selectionPage = 0;
     }
 
     private void handleMessage(Message message, boolean isEdit) {
         String channelId = String.valueOf(message.getChatId());
         if (config.telegramChannelId != null && !config.telegramChannelId.isBlank() && !config.telegramChannelId.equals(channelId)) {
             log.info("Ignored message {} from channel {} (expected {})", message.getMessageId(), channelId, config.telegramChannelId);
+            return;
+        }
+        if (message.getFrom() != null && Boolean.TRUE.equals(message.getFrom().getIsBot())) {
+            log.info("Ignored bot-authored message {} in {}", message.getMessageId(), channelId);
             return;
         }
 
@@ -302,6 +1279,11 @@ public class ShopifyBot extends TelegramLongPollingBot {
         payload.bodyHtml = bodyHtml;
         payload.priceEur = priceSelection.price;
         payload.size = size;
+        String article = TextParser.extractArticle(text);
+        if (article != null && !article.isBlank()) {
+            payload.barcode = article;
+            payload.sku = article;
+        }
         payload.tags = buildTags(resolved, ai);
         payload.productType = selectProductType(resolved);
         payload.images = images;
@@ -585,6 +1567,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         try {
             shopify.deleteProduct(productId);
             db.markProductStatus(productId, "SOLD");
+            db.updateProductCardStatus(productId, "SOLD");
             log.info("Product {} deleted in Shopify (sold)", productId);
         } catch (Exception e) {
             log.warn("Failed to delete product {} (sold)", productId, e);
@@ -612,11 +1595,12 @@ public class ShopifyBot extends TelegramLongPollingBot {
             String priceRsd = TextParser.extractRsd(text);
             TextParser.DiscountInfo discount = TextParser.extractDiscount(text);
             PriceSelection priceSelection = selectPrice(priceEur, priceRsd, discount);
+            String article = TextParser.extractArticle(text);
 
             String telegramLink = buildTelegramLink(channelId, messageId);
             String bodyHtml = buildDescription(text, "", priceSelection, discount, telegramLink);
             ShopifyProductSnapshot snap = shopify.getProductSnapshot(productId);
-            shopify.updateProduct(productId, snap.variantId, title, bodyHtml, priceSelection.price, size);
+            shopify.updateProduct(productId, snap.variantId, title, bodyHtml, priceSelection.price, size, article);
             log.info("Product {} updated from edited message {}", productId, messageId);
             if (telegramLink != null && !telegramLink.isBlank()) {
                 try {
@@ -778,10 +1762,17 @@ public class ShopifyBot extends TelegramLongPollingBot {
 
         for (PostRef ref : byProduct.values()) {
             try {
-                if (!shopify.productExists(ref.productId)) {
+                ShopifyClient.ProductAvailability availability = shopify.getProductAvailability(ref.productId);
+                if (availability == ShopifyClient.ProductAvailability.MISSING) {
                     deleteTelegramByReference(ref.channelId, ref.messageId, ref.mediaGroupId);
                     db.markProductStatus(ref.productId, "MISSING");
+                    db.updateProductCardStatus(ref.productId, "MISSING");
                     log.info("Product missing in Shopify, deleted Telegram message(s). productId={}", ref.productId);
+                } else if (availability == ShopifyClient.ProductAvailability.OUT_OF_STOCK) {
+                    deleteTelegramByReference(ref.channelId, ref.messageId, ref.mediaGroupId);
+                    db.markProductStatus(ref.productId, "OUT_OF_STOCK");
+                    db.updateProductCardStatus(ref.productId, "OUT_OF_STOCK");
+                    log.info("Product out of stock in Shopify, deleted Telegram message(s). productId={}", ref.productId);
                 }
                 if (config.productSyncDelayMs > 0) {
                     Thread.sleep(config.productSyncDelayMs);

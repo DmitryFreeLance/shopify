@@ -51,6 +51,39 @@ public class Database {
                     "key TEXT PRIMARY KEY," +
                     "value TEXT NOT NULL" +
                     ")");
+            stmt.executeUpdate("CREATE TABLE IF NOT EXISTS admin_users (" +
+                    "user_id INTEGER PRIMARY KEY," +
+                    "username TEXT," +
+                    "added_at INTEGER NOT NULL," +
+                    "added_by INTEGER" +
+                    ")");
+            stmt.executeUpdate("CREATE TABLE IF NOT EXISTS bot_users (" +
+                    "user_id INTEGER PRIMARY KEY," +
+                    "username TEXT," +
+                    "first_name TEXT," +
+                    "last_name TEXT," +
+                    "is_admin INTEGER NOT NULL DEFAULT 0," +
+                    "last_seen INTEGER NOT NULL" +
+                    ")");
+            stmt.executeUpdate("CREATE TABLE IF NOT EXISTS product_cards (" +
+                    "product_id INTEGER PRIMARY KEY," +
+                    "channel_id TEXT NOT NULL," +
+                    "message_id INTEGER NOT NULL," +
+                    "media_group_id TEXT," +
+                    "title TEXT NOT NULL," +
+                    "size TEXT," +
+                    "description TEXT NOT NULL," +
+                    "article TEXT NOT NULL UNIQUE," +
+                    "base_price_rsd REAL NOT NULL," +
+                    "current_price_rsd REAL NOT NULL," +
+                    "discount_percent INTEGER NOT NULL DEFAULT 0," +
+                    "fixed_price_rsd REAL," +
+                    "status TEXT NOT NULL DEFAULT 'ACTIVE'," +
+                    "created_at INTEGER NOT NULL," +
+                    "updated_at INTEGER NOT NULL" +
+                    ")");
+            stmt.executeUpdate("CREATE INDEX IF NOT EXISTS idx_product_cards_status ON product_cards(status)");
+            stmt.executeUpdate("CREATE INDEX IF NOT EXISTS idx_product_cards_updated_at ON product_cards(updated_at)");
             try {
                 stmt.executeUpdate("ALTER TABLE collections ADD COLUMN handle TEXT");
             } catch (SQLException ignored) {
@@ -335,9 +368,11 @@ public class Database {
 
     public List<Long> listMessageIdsForMediaGroup(String mediaGroupId) {
         List<Long> ids = new ArrayList<>();
-        String sql = "SELECT DISTINCT message_id FROM media_items WHERE media_group_id=?";
+        String sql = "SELECT DISTINCT message_id FROM media_items WHERE media_group_id=? " +
+                "UNION SELECT DISTINCT message_id FROM posts WHERE media_group_id=?";
         try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, mediaGroupId);
+            ps.setString(2, mediaGroupId);
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     ids.add(rs.getLong(1));
@@ -423,6 +458,21 @@ public class Database {
         }
     }
 
+    public String getMeta(String key) {
+        String sql = "SELECT value FROM meta WHERE key=? LIMIT 1";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, key);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return rs.getString(1);
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("DB getMeta failed", e);
+        }
+        return null;
+    }
+
     public Long findCollectionId(String title) {
         String sql = "SELECT collection_id FROM collections WHERE title=?";
         try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -451,6 +501,305 @@ public class Database {
             throw new RuntimeException("DB findCollectionHandle failed", e);
         }
         return null;
+    }
+
+    public void upsertUser(long userId, String username, String firstName, String lastName, boolean isAdmin) {
+        String sql = "INSERT INTO bot_users(user_id, username, first_name, last_name, is_admin, last_seen) VALUES(?,?,?,?,?,?) " +
+                "ON CONFLICT(user_id) DO UPDATE SET " +
+                "username=excluded.username, first_name=excluded.first_name, last_name=excluded.last_name, " +
+                "is_admin=excluded.is_admin, last_seen=excluded.last_seen";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, userId);
+            ps.setString(2, username);
+            ps.setString(3, firstName);
+            ps.setString(4, lastName);
+            ps.setInt(5, isAdmin ? 1 : 0);
+            ps.setLong(6, Instant.now().getEpochSecond());
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("DB upsertUser failed", e);
+        }
+    }
+
+    public boolean isAdmin(long userId) {
+        String sql = "SELECT 1 FROM admin_users WHERE user_id=? LIMIT 1";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, userId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("DB isAdmin failed", e);
+        }
+    }
+
+    public void addAdmin(long userId, String username, Long addedBy) {
+        long now = Instant.now().getEpochSecond();
+        String adminSql = "INSERT INTO admin_users(user_id, username, added_at, added_by) VALUES(?,?,?,?) " +
+                "ON CONFLICT(user_id) DO UPDATE SET username=excluded.username";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(adminSql)) {
+            ps.setLong(1, userId);
+            ps.setString(2, username);
+            ps.setLong(3, now);
+            if (addedBy == null) {
+                ps.setNull(4, Types.INTEGER);
+            } else {
+                ps.setLong(4, addedBy);
+            }
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("DB addAdmin failed", e);
+        }
+
+        String userSql = "INSERT INTO bot_users(user_id, username, first_name, last_name, is_admin, last_seen) VALUES(?,?,?,?,1,?) " +
+                "ON CONFLICT(user_id) DO UPDATE SET username=excluded.username, is_admin=1, last_seen=excluded.last_seen";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(userSql)) {
+            ps.setLong(1, userId);
+            ps.setString(2, username);
+            ps.setString(3, "");
+            ps.setString(4, "");
+            ps.setLong(5, now);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("DB addAdmin(user upsert) failed", e);
+        }
+    }
+
+    public int countUsers() {
+        String sql = "SELECT COUNT(*) FROM bot_users";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getInt(1) : 0;
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("DB countUsers failed", e);
+        }
+    }
+
+    public List<UserRecord> listUsers(int limit, int offset) {
+        List<UserRecord> items = new ArrayList<>();
+        String sql = "SELECT user_id, username, first_name, last_name, is_admin, last_seen " +
+                "FROM bot_users ORDER BY last_seen DESC LIMIT ? OFFSET ?";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, limit);
+            ps.setInt(2, offset);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    items.add(new UserRecord(
+                            rs.getLong(1),
+                            rs.getString(2),
+                            rs.getString(3),
+                            rs.getString(4),
+                            rs.getInt(5) == 1,
+                            rs.getLong(6)
+                    ));
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("DB listUsers failed", e);
+        }
+        return items;
+    }
+
+    public int countVisibleProducts() {
+        String sql = "SELECT COUNT(*) FROM product_cards WHERE status IN ('ACTIVE','RESERVED')";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getInt(1) : 0;
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("DB countVisibleProducts failed", e);
+        }
+    }
+
+    public int countReservedProducts() {
+        String sql = "SELECT COUNT(*) FROM product_cards WHERE status='RESERVED'";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getInt(1) : 0;
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("DB countReservedProducts failed", e);
+        }
+    }
+
+    public List<ProductCard> listVisibleProducts(int limit, int offset) {
+        return listProductsByStatuses(limit, offset, "status IN ('ACTIVE','RESERVED')");
+    }
+
+    public List<ProductCard> listReservedProducts(int limit, int offset) {
+        return listProductsByStatuses(limit, offset, "status='RESERVED'");
+    }
+
+    public List<ProductCard> listProductsForDiscount() {
+        return listProductsByStatuses(5000, 0, "status IN ('ACTIVE','RESERVED')");
+    }
+
+    private List<ProductCard> listProductsByStatuses(int limit, int offset, String whereClause) {
+        List<ProductCard> items = new ArrayList<>();
+        String sql = "SELECT product_id, channel_id, message_id, media_group_id, title, size, description, article, " +
+                "base_price_rsd, current_price_rsd, discount_percent, fixed_price_rsd, status, created_at, updated_at " +
+                "FROM product_cards WHERE " + whereClause + " ORDER BY created_at ASC LIMIT ? OFFSET ?";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, limit);
+            ps.setInt(2, offset);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    items.add(mapProductCard(rs));
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("DB listProductsByStatuses failed", e);
+        }
+        return items;
+    }
+
+    public ProductCard findVisibleProductByOrdinal(int ordinal) {
+        if (ordinal <= 0) return null;
+        List<ProductCard> items = listVisibleProducts(1, ordinal - 1);
+        return items.isEmpty() ? null : items.get(0);
+    }
+
+    public ProductCard findReservedProductByOrdinal(int ordinal) {
+        if (ordinal <= 0) return null;
+        List<ProductCard> items = listReservedProducts(1, ordinal - 1);
+        return items.isEmpty() ? null : items.get(0);
+    }
+
+    public ProductCard findProductCardById(long productId) {
+        String sql = "SELECT product_id, channel_id, message_id, media_group_id, title, size, description, article, " +
+                "base_price_rsd, current_price_rsd, discount_percent, fixed_price_rsd, status, created_at, updated_at " +
+                "FROM product_cards WHERE product_id=?";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, productId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return mapProductCard(rs);
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("DB findProductCardById failed", e);
+        }
+        return null;
+    }
+
+    public boolean existsActiveArticle(String article) {
+        String sql = "SELECT 1 FROM product_cards WHERE article=? AND status IN ('ACTIVE','RESERVED') LIMIT 1";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, article);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("DB existsActiveArticle failed", e);
+        }
+    }
+
+    public void upsertProductCard(ProductCard card) {
+        long now = Instant.now().getEpochSecond();
+        String sql = "INSERT INTO product_cards(product_id, channel_id, message_id, media_group_id, title, size, description, article, " +
+                "base_price_rsd, current_price_rsd, discount_percent, fixed_price_rsd, status, created_at, updated_at) " +
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) " +
+                "ON CONFLICT(product_id) DO UPDATE SET " +
+                "channel_id=excluded.channel_id, message_id=excluded.message_id, media_group_id=excluded.media_group_id, " +
+                "title=excluded.title, size=excluded.size, description=excluded.description, article=excluded.article, " +
+                "base_price_rsd=excluded.base_price_rsd, current_price_rsd=excluded.current_price_rsd, " +
+                "discount_percent=excluded.discount_percent, fixed_price_rsd=excluded.fixed_price_rsd, " +
+                "status=excluded.status, updated_at=excluded.updated_at";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, card.productId);
+            ps.setString(2, card.channelId);
+            ps.setLong(3, card.messageId);
+            ps.setString(4, card.mediaGroupId);
+            ps.setString(5, card.title);
+            ps.setString(6, card.size);
+            ps.setString(7, card.description);
+            ps.setString(8, card.article);
+            ps.setDouble(9, card.basePriceRsd);
+            ps.setDouble(10, card.currentPriceRsd);
+            ps.setInt(11, card.discountPercent);
+            if (card.fixedPriceRsd == null) {
+                ps.setNull(12, Types.REAL);
+            } else {
+                ps.setDouble(12, card.fixedPriceRsd);
+            }
+            ps.setString(13, card.status);
+            ps.setLong(14, card.createdAt <= 0 ? now : card.createdAt);
+            ps.setLong(15, now);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("DB upsertProductCard failed", e);
+        }
+    }
+
+    public void updateProductCardStatus(long productId, String status) {
+        String sql = "UPDATE product_cards SET status=?, updated_at=? WHERE product_id=?";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, status);
+            ps.setLong(2, Instant.now().getEpochSecond());
+            ps.setLong(3, productId);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("DB updateProductCardStatus failed", e);
+        }
+    }
+
+    public void updateProductCardReservation(long productId, boolean reserved) {
+        updateProductCardStatus(productId, reserved ? "RESERVED" : "ACTIVE");
+    }
+
+    public void updateProductCardPricing(long productId, double currentPriceRsd, int discountPercent, Double fixedPriceRsd) {
+        String sql = "UPDATE product_cards SET current_price_rsd=?, discount_percent=?, fixed_price_rsd=?, updated_at=? WHERE product_id=?";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setDouble(1, currentPriceRsd);
+            ps.setInt(2, discountPercent);
+            if (fixedPriceRsd == null) {
+                ps.setNull(3, Types.REAL);
+            } else {
+                ps.setDouble(3, fixedPriceRsd);
+            }
+            ps.setLong(4, Instant.now().getEpochSecond());
+            ps.setLong(5, productId);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("DB updateProductCardPricing failed", e);
+        }
+    }
+
+    public void touchProductCardMessage(long productId, String channelId, long messageId, String mediaGroupId) {
+        String sql = "UPDATE product_cards SET channel_id=?, message_id=?, media_group_id=?, updated_at=? WHERE product_id=?";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, channelId);
+            ps.setLong(2, messageId);
+            ps.setString(3, mediaGroupId);
+            ps.setLong(4, Instant.now().getEpochSecond());
+            ps.setLong(5, productId);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("DB touchProductCardMessage failed", e);
+        }
+    }
+
+    private ProductCard mapProductCard(ResultSet rs) throws SQLException {
+        Number fixedRaw = (Number) rs.getObject(12);
+        Double fixed = fixedRaw == null ? null : fixedRaw.doubleValue();
+        return new ProductCard(
+                rs.getLong(1),
+                rs.getString(2),
+                rs.getLong(3),
+                rs.getString(4),
+                rs.getString(5),
+                rs.getString(6),
+                rs.getString(7),
+                rs.getString(8),
+                rs.getDouble(9),
+                rs.getDouble(10),
+                rs.getInt(11),
+                fixed,
+                rs.getString(13),
+                rs.getLong(14),
+                rs.getLong(15)
+        );
     }
 
     public static class MediaItem {
@@ -482,6 +831,74 @@ public class Database {
             this.messageId = messageId;
             this.mediaGroupId = mediaGroupId;
             this.productId = productId;
+        }
+    }
+
+    public static class UserRecord {
+        public final long userId;
+        public final String username;
+        public final String firstName;
+        public final String lastName;
+        public final boolean admin;
+        public final long lastSeen;
+
+        public UserRecord(long userId, String username, String firstName, String lastName, boolean admin, long lastSeen) {
+            this.userId = userId;
+            this.username = username;
+            this.firstName = firstName;
+            this.lastName = lastName;
+            this.admin = admin;
+            this.lastSeen = lastSeen;
+        }
+    }
+
+    public static class ProductCard {
+        public final long productId;
+        public final String channelId;
+        public final long messageId;
+        public final String mediaGroupId;
+        public final String title;
+        public final String size;
+        public final String description;
+        public final String article;
+        public final double basePriceRsd;
+        public final double currentPriceRsd;
+        public final int discountPercent;
+        public final Double fixedPriceRsd;
+        public final String status;
+        public final long createdAt;
+        public final long updatedAt;
+
+        public ProductCard(long productId,
+                           String channelId,
+                           long messageId,
+                           String mediaGroupId,
+                           String title,
+                           String size,
+                           String description,
+                           String article,
+                           double basePriceRsd,
+                           double currentPriceRsd,
+                           int discountPercent,
+                           Double fixedPriceRsd,
+                           String status,
+                           long createdAt,
+                           long updatedAt) {
+            this.productId = productId;
+            this.channelId = channelId;
+            this.messageId = messageId;
+            this.mediaGroupId = mediaGroupId;
+            this.title = title;
+            this.size = size;
+            this.description = description;
+            this.article = article;
+            this.basePriceRsd = basePriceRsd;
+            this.currentPriceRsd = currentPriceRsd;
+            this.discountPercent = discountPercent;
+            this.fixedPriceRsd = fixedPriceRsd;
+            this.status = status;
+            this.createdAt = createdAt;
+            this.updatedAt = updatedAt;
         }
     }
 }

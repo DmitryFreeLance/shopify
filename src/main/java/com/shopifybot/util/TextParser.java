@@ -15,6 +15,7 @@ public class TextParser {
     private static final Pattern EUR_TEXT_PATTERN = Pattern.compile("(?i)(\\d+[\\d.,]*)\\s*eur");
     private static final Pattern CENA_PATTERN = Pattern.compile("(?iu)\\b(cena|цена)\\b\\s*[-:]*\\s*(\\d+[\\d.,]*)\\s*(rsd|din|дин|eur|€)?");
     private static final Pattern SIZE_PATTERN = Pattern.compile("(?i)(?:vel|veli[čc]ina|size)\\s*[-:]?\\s*([^\\n]+)");
+    private static final Pattern ARTICLE_PATTERN = Pattern.compile("(?iu)\\b(artikal|артикул)\\b\\s*[:\\-]?\\s*(\\d{8})\\b");
     private static final Pattern DISCOUNT_PATTERN = Pattern.compile("(?i)(\\d+[\\d.,]*)\\s*[-–]\\s*(\\d{1,2})\\s*%\\s*=\\s*(\\d+[\\d.,]*)");
     private static final Pattern DISCOUNT_FRAGMENT_PATTERN = Pattern.compile("(?iu)^[\\d\\s.,%\\-–—−=€:]+$");
 
@@ -101,6 +102,15 @@ public class TextParser {
         Matcher m = SIZE_PATTERN.matcher(text);
         if (m.find()) {
             return m.group(1).trim();
+        }
+        return "";
+    }
+
+    public static String extractArticle(String text) {
+        if (text == null) return "";
+        Matcher m = ARTICLE_PATTERN.matcher(text);
+        if (m.find()) {
+            return m.group(2).trim();
         }
         return "";
     }

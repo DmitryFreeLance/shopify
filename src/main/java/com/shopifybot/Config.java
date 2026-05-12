@@ -10,15 +10,21 @@ public class Config {
     public final String telegramBotToken;
     public final String telegramChannelId;
     public final String telegramChannelUsername;
+    public final String telegramPublishChatId;
+    public final Integer telegramPublishThreadId;
     public final String telegramLinkMetafieldNamespace;
     public final String telegramLinkMetafieldKey;
     public final String telegramLinkMetafieldType;
+    public final List<Long> adminUserIds;
+    public final int listPageSize;
     public final String priceKeyword;
     public final String priceSource;
     public final List<String> soldKeywords;
     public final long mediaGroupFinalizeSeconds;
     public final long productSyncSeconds;
     public final long productSyncDelayMs;
+    public final long discountSyncSeconds;
+    public final String discountTimezone;
     public final String sqlitePath;
 
     public final String kieApiKey;
@@ -45,9 +51,18 @@ public class Config {
         this.telegramBotToken = requireEnv("TELEGRAM_BOT_TOKEN");
         this.telegramChannelId = getenv("TELEGRAM_CHANNEL_ID", "-1003856584928");
         this.telegramChannelUsername = getenv("TELEGRAM_CHANNEL_USERNAME", "");
+        this.telegramPublishChatId = getenv("TELEGRAM_PUBLISH_CHAT_ID", this.telegramChannelId);
+        this.telegramPublishThreadId = parseNullableInt(getenv("TELEGRAM_PUBLISH_THREAD_ID", ""));
         this.telegramLinkMetafieldNamespace = getenv("TELEGRAM_LINK_METAFIELD_NAMESPACE", "custom");
         this.telegramLinkMetafieldKey = getenv("TELEGRAM_LINK_METAFIELD_KEY", "tg_link");
         this.telegramLinkMetafieldType = getenv("TELEGRAM_LINK_METAFIELD_TYPE", "link");
+        this.adminUserIds = Arrays.stream(getenv("ADMIN_USER_IDS", "").split(","))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .map(Config::parseLongStrict)
+                .filter(v -> v != null && v > 0)
+                .collect(Collectors.toList());
+        this.listPageSize = (int) parseLong(getenv("LIST_PAGE_SIZE", "8"), 8);
         this.priceKeyword = getenv("PRICE_KEYWORD", "cena").toLowerCase(Locale.ROOT);
         this.priceSource = getenv("PRICE_SOURCE", "AUTO");
         this.soldKeywords = Arrays.stream(getenv("SOLD_KEYWORDS", "prodato").split(","))
@@ -58,6 +73,8 @@ public class Config {
         this.mediaGroupFinalizeSeconds = parseLong(getenv("MEDIA_GROUP_FINALIZE_SECONDS", "30"), 30);
         this.productSyncSeconds = parseLong(getenv("PRODUCT_SYNC_SECONDS", "180"), 180);
         this.productSyncDelayMs = parseLong(getenv("PRODUCT_SYNC_DELAY_MS", "200"), 200);
+        this.discountSyncSeconds = parseLong(getenv("DISCOUNT_SYNC_SECONDS", "3600"), 3600);
+        this.discountTimezone = getenv("DISCOUNT_TIMEZONE", "Europe/Belgrade");
         this.sqlitePath = getenv("SQLITE_PATH", "./data/bot.db");
 
         this.kieApiKey = requireEnv("KIE_API_KEY");
@@ -103,6 +120,23 @@ public class Config {
             return Long.parseLong(value);
         } catch (NumberFormatException e) {
             return fallback;
+        }
+    }
+
+    private static Integer parseNullableInt(String value) {
+        if (value == null || value.isBlank()) return null;
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private static Long parseLongStrict(String value) {
+        try {
+            return Long.parseLong(value);
+        } catch (NumberFormatException e) {
+            return null;
         }
     }
 }

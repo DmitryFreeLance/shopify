@@ -95,10 +95,22 @@ public class ShopifyClient {
             ObjectNode variant = variants.addObject();
             variant.put("option1", payload.size);
             variant.put("price", payload.priceEur);
+            if (payload.barcode != null && !payload.barcode.isBlank()) {
+                variant.put("barcode", payload.barcode);
+            }
+            if (payload.sku != null && !payload.sku.isBlank()) {
+                variant.put("sku", payload.sku);
+            }
         } else {
             ArrayNode variants = product.putArray("variants");
             ObjectNode variant = variants.addObject();
             variant.put("price", payload.priceEur);
+            if (payload.barcode != null && !payload.barcode.isBlank()) {
+                variant.put("barcode", payload.barcode);
+            }
+            if (payload.sku != null && !payload.sku.isBlank()) {
+                variant.put("sku", payload.sku);
+            }
         }
 
         ArrayNode images = product.putArray("images");
@@ -156,19 +168,27 @@ public class ShopifyClient {
         JsonNode product = root.path("product");
         JsonNode variants = product.path("variants");
         long variantId = 0;
+        String variantBarcode = "";
         if (variants.isArray() && variants.size() > 0) {
             variantId = variants.get(0).path("id").asLong(0);
+            variantBarcode = variants.get(0).path("barcode").asText("");
         }
         return new ShopifyProductSnapshot(
                 product.path("id").asLong(0),
                 variantId,
+                variantBarcode,
                 product.path("title").asText(""),
+                product.path("body_html").asText(""),
                 product.path("tags").asText(""),
                 product.path("product_type").asText("")
         );
     }
 
     public void updateProduct(long productId, long variantId, String title, String bodyHtml, String price, String size) throws IOException {
+        updateProduct(productId, variantId, title, bodyHtml, price, size, null);
+    }
+
+    public void updateProduct(long productId, long variantId, String title, String bodyHtml, String price, String size, String barcode) throws IOException {
         ObjectNode root = mapper.createObjectNode();
         ObjectNode product = root.putObject("product");
         product.put("id", productId);
@@ -185,6 +205,9 @@ public class ShopifyClient {
         }
         if (size != null && !size.isBlank()) {
             variant.put("option1", size);
+        }
+        if (barcode != null && !barcode.isBlank()) {
+            variant.put("barcode", barcode);
         }
         variant.put("price", price);
 
@@ -224,6 +247,54 @@ public class ShopifyClient {
                 throw new IOException("Shopify GET product failed: " + response.code() + " " + response.message());
             }
             return true;
+        }
+    }
+
+    public ProductAvailability getProductAvailability(long productId) throws IOException {
+        Request request = new Request.Builder()
+                .url(restBase() + "/products/" + productId + ".json")
+                .addHeader("X-Shopify-Access-Token", tokenProvider.getToken())
+                .get()
+                .build();
+        try (Response response = http.newCall(request).execute()) {
+            if (response.code() == 404) return ProductAvailability.MISSING;
+            if (response.code() == 429) {
+                String retryAfter = response.header("Retry-After", "");
+                long retryAfterSeconds = 0;
+                if (retryAfter != null && !retryAfter.isBlank()) {
+                    try {
+                        retryAfterSeconds = Long.parseLong(retryAfter.trim());
+                    } catch (NumberFormatException ignored) {
+                        retryAfterSeconds = 0;
+                    }
+                }
+                throw new RateLimitException("Shopify GET product availability rate limited", retryAfterSeconds);
+            }
+            if (!response.isSuccessful()) {
+                throw new IOException("Shopify GET product availability failed: " + response.code() + " " + response.message());
+            }
+            JsonNode root = mapper.readTree(response.body().string());
+            JsonNode variants = root.path("product").path("variants");
+            if (!variants.isArray() || variants.isEmpty()) {
+                return ProductAvailability.IN_STOCK;
+            }
+
+            boolean hasTrackedVariants = false;
+            for (JsonNode variant : variants) {
+                String inventoryManagement = variant.path("inventory_management").asText("");
+                if (inventoryManagement == null || inventoryManagement.isBlank() || "null".equalsIgnoreCase(inventoryManagement)) {
+                    continue;
+                }
+                hasTrackedVariants = true;
+                int quantity = variant.path("inventory_quantity").asInt(0);
+                if (quantity > 0) {
+                    return ProductAvailability.IN_STOCK;
+                }
+            }
+            if (!hasTrackedVariants) {
+                return ProductAvailability.IN_STOCK;
+            }
+            return ProductAvailability.OUT_OF_STOCK;
         }
     }
 
@@ -457,6 +528,8 @@ public class ShopifyClient {
         public String productType;
         public String priceEur;
         public String size;
+        public String barcode;
+        public String sku;
         public List<String> tags;
         public List<byte[]> images;
     }
@@ -499,5 +572,11 @@ public class ShopifyClient {
             this.handle = handle;
             this.title = title;
         }
+    }
+
+    public enum ProductAvailability {
+        IN_STOCK,
+        OUT_OF_STOCK,
+        MISSING
     }
 }

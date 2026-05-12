@@ -64,6 +64,7 @@ import java.util.regex.Pattern;
 
 public class ShopifyBot extends TelegramLongPollingBot {
     private static final Logger log = LoggerFactory.getLogger(ShopifyBot.class);
+    private static final String ORDER_CONTACT_FOOTER = "Ako želite da naručite neku stvar, pošaljite fotografiju ove stvari @alinka809 ili @hlestovdmitry";
     private static final String CB_MENU = "MENU";
     private static final String CB_NOOP = "NOOP";
     private static final String CB_ADD_PRODUCT = "OPEN:ADD_PRODUCT";
@@ -104,7 +105,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         this.kie = new KieAiClient(http, config.kieApiKey, config.kieModel, config.kieBaseUrl, config.kieEndpointOverride);
 
         scheduler.scheduleWithFixedDelay(this::processReadyMediaGroups, 15, 15, TimeUnit.SECONDS);
-        scheduler.scheduleWithFixedDelay(this::syncDeletedProducts, config.productSyncSeconds, config.productSyncSeconds, TimeUnit.SECONDS);
+        scheduler.scheduleWithFixedDelay(this::syncDeletedProductsSafe, config.productSyncSeconds, config.productSyncSeconds, TimeUnit.SECONDS);
         scheduler.scheduleWithFixedDelay(this::syncDiscountsSafe, 60, Math.max(300, config.discountSyncSeconds), TimeUnit.SECONDS);
     }
 
@@ -975,7 +976,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
         lines.add("Cena - " + formatRsd(currentPriceRsd) + " RSD");
         lines.add("Artikal: " + article);
-        return String.join("\n", lines);
+        return String.join("\n", lines) + "\n\n" + ORDER_CONTACT_FOOTER;
     }
 
     private String formatPriceForShopify(double value) {
@@ -1169,6 +1170,14 @@ public class ShopifyBot extends TelegramLongPollingBot {
             syncDiscounts();
         } catch (Exception e) {
             log.warn("Discount sync failed", e);
+        }
+    }
+
+    private void syncDeletedProductsSafe() {
+        try {
+            syncDeletedProducts();
+        } catch (Exception e) {
+            log.warn("Product availability sync failed", e);
         }
     }
 

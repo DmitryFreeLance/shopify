@@ -95,6 +95,9 @@ public class ShopifyClient {
             ObjectNode variant = variants.addObject();
             variant.put("option1", payload.size);
             variant.put("price", payload.priceEur);
+            // Keep unique second-hand items tracked in inventory, so POS sale can drive auto-removal.
+            variant.put("inventory_management", "shopify");
+            variant.put("inventory_policy", "deny");
             if (payload.barcode != null && !payload.barcode.isBlank()) {
                 variant.put("barcode", payload.barcode);
             }
@@ -105,6 +108,9 @@ public class ShopifyClient {
             ArrayNode variants = product.putArray("variants");
             ObjectNode variant = variants.addObject();
             variant.put("price", payload.priceEur);
+            // Keep unique second-hand items tracked in inventory, so POS sale can drive auto-removal.
+            variant.put("inventory_management", "shopify");
+            variant.put("inventory_policy", "deny");
             if (payload.barcode != null && !payload.barcode.isBlank()) {
                 variant.put("barcode", payload.barcode);
             }
@@ -274,7 +280,12 @@ public class ShopifyClient {
                 throw new IOException("Shopify GET product availability failed: " + response.code() + " " + response.message());
             }
             JsonNode root = mapper.readTree(response.body().string());
-            JsonNode variants = root.path("product").path("variants");
+            JsonNode product = root.path("product");
+            String status = product.path("status").asText("");
+            if ("archived".equalsIgnoreCase(status) || "draft".equalsIgnoreCase(status)) {
+                return ProductAvailability.OUT_OF_STOCK;
+            }
+            JsonNode variants = product.path("variants");
             if (!variants.isArray() || variants.isEmpty()) {
                 return ProductAvailability.IN_STOCK;
             }

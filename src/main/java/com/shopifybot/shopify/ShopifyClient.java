@@ -124,9 +124,18 @@ public class ShopifyClient {
         }
 
         ArrayNode images = product.putArray("images");
-        for (byte[] image : payload.images) {
-            ObjectNode img = images.addObject();
-            img.put("attachment", Base64.getEncoder().encodeToString(image));
+        if (payload.images != null) {
+            for (byte[] image : payload.images) {
+                ObjectNode img = images.addObject();
+                img.put("attachment", Base64.getEncoder().encodeToString(image));
+            }
+        }
+        if (payload.imageUrls != null) {
+            for (String imageUrl : payload.imageUrls) {
+                if (imageUrl == null || imageUrl.isBlank()) continue;
+                ObjectNode img = images.addObject();
+                img.put("src", imageUrl);
+            }
         }
 
         JsonNode response = post(restBase() + "/products.json", root);
@@ -192,6 +201,22 @@ public class ShopifyClient {
                 product.path("tags").asText(""),
                 product.path("product_type").asText("")
         );
+    }
+
+    public List<String> getProductImageUrls(long productId) throws IOException {
+        List<String> urls = new ArrayList<>();
+        JsonNode root = get(restBase() + "/products/" + productId + ".json");
+        JsonNode images = root.path("product").path("images");
+        if (!images.isArray()) {
+            return urls;
+        }
+        for (JsonNode image : images) {
+            String src = image.path("src").asText("");
+            if (src != null && !src.isBlank()) {
+                urls.add(src);
+            }
+        }
+        return urls;
     }
 
     public void updateProduct(long productId, long variantId, String title, String bodyHtml, String price, String size) throws IOException {
@@ -547,6 +572,7 @@ public class ShopifyClient {
         public String sku;
         public List<String> tags;
         public List<byte[]> images;
+        public List<String> imageUrls;
     }
 
     public static class Menu {

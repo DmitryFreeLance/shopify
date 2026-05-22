@@ -260,14 +260,14 @@ public class ShopifyBot extends TelegramLongPollingBot {
         if (CB_ADD_PRODUCT_AI.equals(data)) {
             resetSession(session);
             session.state = AdminState.AI_DRAFT_PHOTOS;
-            sendAiPhotoPrompt(chatId, session.pendingPhotoFileIds.size(), false);
+            sendAiPhotoPrompt(chatId, session, false);
             answerCallback(callback, "");
             return;
         }
         if (CB_WITHOUT_PHOTO.equals(data)) {
             resetSession(session);
             session.state = AdminState.WITHOUT_PHOTO_PHOTOS;
-            sendAiPhotoPrompt(chatId, session.pendingPhotoFileIds.size(), true);
+            sendAiPhotoPrompt(chatId, session, true);
             answerCallback(callback, "");
             return;
         }
@@ -453,22 +453,23 @@ public class ShopifyBot extends TelegramLongPollingBot {
                     && session.state != AdminState.WITHOUT_PHOTO_PHOTOS) {
                 session.state = AdminState.ADD_PRODUCT_PHOTOS;
             }
-            if (session.pendingPhotoFileIds.isEmpty()) {
-                if (session.state == AdminState.AI_DRAFT_PHOTOS || session.state == AdminState.WITHOUT_PHOTO_PHOTOS) {
-                    sendAiPhotoPrompt(chatId, 0, session.state == AdminState.WITHOUT_PHOTO_PHOTOS);
-                } else {
-                    sendPhotoUploadPrompt(chatId, 0);
-                }
-                answerCallback(callback, "Сначала добавьте хотя бы одно фото");
-                return;
-            }
             if (session.state == AdminState.AI_DRAFT_PHOTOS || session.state == AdminState.WITHOUT_PHOTO_PHOTOS) {
+                if (session.aiPhotoGroups.isEmpty()) {
+                    sendAiPhotoPrompt(chatId, session, session.state == AdminState.WITHOUT_PHOTO_PHOTOS);
+                    answerCallback(callback, "Сначала добавьте хотя бы одну группу фото");
+                    return;
+                }
                 if (session.aiProcessing) {
                     answerCallback(callback, "Уже обрабатываю фото, подождите");
                     return;
                 }
                 buildDraftFromAi(chatId, session, session.state == AdminState.WITHOUT_PHOTO_PHOTOS);
                 answerCallback(callback, "");
+                return;
+            }
+            if (session.pendingPhotoFileIds.isEmpty()) {
+                sendPhotoUploadPrompt(chatId, 0);
+                answerCallback(callback, "Сначала добавьте хотя бы одно фото");
                 return;
             }
             session.state = AdminState.ADD_PRODUCT_DESCRIPTION;
@@ -483,7 +484,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
         if (CB_BACK_TO_PHOTOS.equals(data)) {
             if (session.state == AdminState.AI_DRAFT_PHOTOS || session.state == AdminState.WITHOUT_PHOTO_PHOTOS) {
-                sendAiPhotoPrompt(chatId, session.pendingPhotoFileIds.size(), session.state == AdminState.WITHOUT_PHOTO_PHOTOS);
+                sendAiPhotoPrompt(chatId, session, session.state == AdminState.WITHOUT_PHOTO_PHOTOS);
             } else {
                 session.state = AdminState.ADD_PRODUCT_PHOTOS;
                 sendPhotoUploadPrompt(chatId, session.pendingPhotoFileIds.size());
@@ -644,27 +645,29 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 || session.state == AdminState.AI_DRAFT_PHOTOS
                 || session.state == AdminState.WITHOUT_PHOTO_PHOTOS) {
             boolean withoutPhoto = session.state == AdminState.WITHOUT_PHOTO_PHOTOS;
+            boolean aiBatchMode = session.state == AdminState.AI_DRAFT_PHOTOS || session.state == AdminState.WITHOUT_PHOTO_PHOTOS;
+            if (aiBatchMode && session.aiProcessing) {
+                sendText(chatId, "⏳ Идет обработка групп через ИИ, дождитесь результата.");
+                return;
+            }
             if (message.getPhoto() != null && !message.getPhoto().isEmpty()) {
-                if (session.pendingPhotoFileIds.size() >= 9) {
-                    if (session.state == AdminState.ADD_PRODUCT_PHOTOS) {
-                        sendPhotoUploadPrompt(chatId, session.pendingPhotoFileIds.size());
-                    } else {
-                        sendAiPhotoPrompt(chatId, session.pendingPhotoFileIds.size(), withoutPhoto);
-                    }
+                if (!aiBatchMode && session.pendingPhotoFileIds.size() >= 9) {
+                    sendPhotoUploadPrompt(chatId, session.pendingPhotoFileIds.size());
                     return;
                 }
-                PhotoSize best = selectBestPhoto(message.getPhoto());
-                session.pendingPhotoFileIds.add(best.getFileId());
-                if (session.state == AdminState.ADD_PRODUCT_PHOTOS) {
-                    sendPhotoUploadPrompt(chatId, session.pendingPhotoFileIds.size());
+                if (aiBatchMode) {
+                    addPhotoToAiBatch(session, message);
+                    sendAiPhotoPrompt(chatId, session, withoutPhoto);
                 } else {
-                    sendAiPhotoPrompt(chatId, session.pendingPhotoFileIds.size(), withoutPhoto);
+                    PhotoSize best = selectBestPhoto(message.getPhoto());
+                    session.pendingPhotoFileIds.add(best.getFileId());
+                    sendPhotoUploadPrompt(chatId, session.pendingPhotoFileIds.size());
                 }
             } else {
                 if (session.state == AdminState.ADD_PRODUCT_PHOTOS) {
                     sendPhotoUploadPrompt(chatId, session.pendingPhotoFileIds.size());
                 } else {
-                    sendAiPhotoPrompt(chatId, session.pendingPhotoFileIds.size(), withoutPhoto);
+                    sendAiPhotoPrompt(chatId, session, withoutPhoto);
                 }
             }
             return;
@@ -1899,33 +1902,56 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 ));
     }
 
-    private void sendAiPhotoPrompt(long chatId, int photoCount, boolean withoutPhotoMode) {
+    private void sendAiPhotoPrompt(long chatId, AdminSession session, boolean withoutPhotoMode) {
+        int groups = session.aiPhotoGroups.size();
+        int totalPhotos = 0;
+        for (List<String> files : session.aiPhotoGroups.values()) {
+            totalPhotos += files.size();
+        }
         String text;
         if (withoutPhotoMode) {
             text = "🧾 Режим «Без фото»\n\n" +
-                    "Отправьте фото ценников (до 9 шт.).\n" +
+                    "Отправьте альбомы с фото ценников (в каждом альбоме до 9 фото).\n" +
                     "Бот считает цену и артикул, затем покажет карточку для проверки.\n" +
-                    "Принято: " + photoCount + "/9.";
+                    "Групп товаров: " + groups + "\n" +
+                    "Всего фото: " + totalPhotos + ".";
         } else {
             text = "🤖 Добавление товара по фото\n\n" +
-                    "Отправьте до 9 фото товара.\n" +
+                    "Отправляйте альбомы фото: каждый альбом (до 9 фото) = отдельный товар.\n" +
                     "Бот автоматически заполнит карточку (бренд, размер, цена" +
                     (isArticleEnabled() ? ", артикул" : "") +
                     ").\n" +
-                    "Принято: " + photoCount + "/9.";
+                    "Групп товаров: " + groups + "\n" +
+                    "Всего фото: " + totalPhotos + ".";
         }
-        if (photoCount <= 0) {
+        if (groups <= 0) {
             text += "\n\nЗагрузите первое фото.";
             sendText(chatId, text, inlineSingleColumn(
                     button("Отменить", CB_CANCEL_FLOW)
             ));
             return;
         }
-        text += "\n\nЕсли достаточно фото, нажмите «Готово».";
+        text += "\n\nЕсли все группы добавлены, нажмите «Готово».";
         sendText(chatId, text, inlineSingleColumn(
                 button("Готово", CB_DONE_PHOTOS),
                 button("Отменить", CB_CANCEL_FLOW)
         ));
+    }
+
+    private void addPhotoToAiBatch(AdminSession session, Message message) {
+        if (message == null || message.getPhoto() == null || message.getPhoto().isEmpty()) {
+            return;
+        }
+        String groupKey = message.getMediaGroupId();
+        if (groupKey == null || groupKey.isBlank()) {
+            groupKey = "single:" + message.getMessageId();
+        }
+        List<String> group = session.aiPhotoGroups.computeIfAbsent(groupKey, k -> new ArrayList<>());
+        if (group.size() >= 9) {
+            return;
+        }
+        PhotoSize best = selectBestPhoto(message.getPhoto());
+        group.add(best.getFileId());
     }
 
     private void buildDraftFromAi(long chatId, AdminSession session, boolean withoutPhotoMode) {
@@ -1933,48 +1959,62 @@ public class ShopifyBot extends TelegramLongPollingBot {
             sendText(chatId, "⏳ Уже обрабатываю фото, пожалуйста подождите.");
             return;
         }
-        if (session.pendingPhotoFileIds.isEmpty()) {
-            sendAiPhotoPrompt(chatId, 0, withoutPhotoMode);
+        if (session.aiPhotoGroups.isEmpty()) {
+            sendAiPhotoPrompt(chatId, session, withoutPhotoMode);
             return;
         }
         session.aiProcessing = true;
-        List<String> fileIds = new ArrayList<>(session.pendingPhotoFileIds);
-        sendText(chatId, "⏳ Анализирую фото через ИИ...");
+        List<List<String>> groups = new ArrayList<>();
+        for (List<String> fileIds : session.aiPhotoGroups.values()) {
+            if (fileIds != null && !fileIds.isEmpty()) {
+                groups.add(new ArrayList<>(fileIds));
+            }
+        }
+        sendText(chatId, "⏳ Анализирую товары через ИИ... Групп: " + groups.size());
         workers.submit(() -> {
             try {
-                List<byte[]> images = new ArrayList<>();
-                for (String fileId : fileIds) {
-                    try {
-                        images.add(downloadFileBytes(fileId));
-                    } catch (Exception e) {
-                        log.warn("Failed to download image {} for AI draft", fileId, e);
+                List<DraftData> drafts = new ArrayList<>();
+                for (int gi = 0; gi < groups.size(); gi++) {
+                    List<String> fileIds = groups.get(gi);
+                    List<byte[]> images = new ArrayList<>();
+                    for (String fileId : fileIds) {
+                        try {
+                            images.add(downloadFileBytes(fileId));
+                        } catch (Exception e) {
+                            log.warn("Failed to download image {} for AI draft batch", fileId, e);
+                        }
                     }
-                }
-                if (images.isEmpty()) {
-                    sendAiPhotoPrompt(chatId, 0, withoutPhotoMode);
-                    return;
+                    if (images.isEmpty()) {
+                        continue;
+                    }
+
+                    DraftData draft = requestDraftFromAi(images, withoutPhotoMode);
+                    draft.mode = withoutPhotoMode ? DraftMode.POS_ONLY : DraftMode.ONLINE_WITH_PHOTO;
+                    draft.photoFileIds = new ArrayList<>(fileIds);
+                    draft.status = "ACTIVE";
+                    if (draft.title == null || draft.title.isBlank()) {
+                        draft.title = withoutPhotoMode ? "Без фото" : "Товар";
+                    }
+                    if (withoutPhotoMode) {
+                        draft.title = "Без фото";
+                        draft.size = "";
+                    }
+                    if (!isArticleEnabled()) {
+                        draft.article = generateInternalArticle();
+                    } else {
+                        String digits = draft.article == null ? "" : draft.article.replaceAll("\\D", "");
+                        draft.article = digits.matches("\\d{8}") ? digits : "";
+                    }
+                    if (draft.priceRsd <= 0) {
+                        log.warn("AI draft has invalid price for batch item {}", gi + 1);
+                        continue;
+                    }
+                    drafts.add(draft);
                 }
 
-                DraftData draft = requestDraftFromAi(images, withoutPhotoMode);
-                draft.mode = withoutPhotoMode ? DraftMode.POS_ONLY : DraftMode.ONLINE_WITH_PHOTO;
-                draft.photoFileIds = new ArrayList<>(fileIds);
-                draft.status = "ACTIVE";
-                if (draft.title == null || draft.title.isBlank()) {
-                    draft.title = withoutPhotoMode ? "Без фото" : "Товар";
-                }
-                if (withoutPhotoMode) {
-                    draft.title = "Без фото";
-                    draft.size = "";
-                }
-                if (!isArticleEnabled()) {
-                    draft.article = generateInternalArticle();
-                } else {
-                    String digits = draft.article == null ? "" : draft.article.replaceAll("\\D", "");
-                    draft.article = digits.matches("\\d{8}") ? digits : "";
-                }
-                if (draft.priceRsd <= 0) {
+                if (drafts.isEmpty()) {
                     sendText(chatId,
-                            "❗ ИИ не смог корректно распознать цену. Загрузите более четкое фото ценника или выберите обычный способ.",
+                            "❗ Не удалось подготовить карточки. Проверьте фото и попробуйте снова.",
                             inlineSingleColumn(
                                     button("⬅ Назад в меню", CB_MENU),
                                     button("Отменить", CB_CANCEL_FLOW)
@@ -1982,8 +2022,13 @@ public class ShopifyBot extends TelegramLongPollingBot {
                     return;
                 }
 
-                session.draft = draft;
+                session.aiPhotoGroups.clear();
+                session.draftQueue.clear();
+                session.draftQueue.addAll(drafts);
+                session.draftQueueIndex = 0;
+                session.draft = session.draftQueue.get(0);
                 session.state = AdminState.DRAFT_EDIT_CHOICE;
+                sendText(chatId, "✅ Карточки готовы: " + drafts.size() + ". Показываю товар 1/" + drafts.size() + ".");
                 sendDraftPreview(chatId, session, true);
             } catch (Exception e) {
                 log.warn("Failed to build AI draft", e);
@@ -2045,6 +2090,11 @@ public class ShopifyBot extends TelegramLongPollingBot {
             } catch (IOException e) {
                 lastIo = e;
                 log.warn("AI draft parse failed model={} attempt={}/{}: {}", model, i + 1, attempts, e.getMessage());
+                if (isTimeoutError(e)) {
+                    // If primary/fallback timed out locally, do not fan out to next model:
+                    // user explicitly requested to avoid extra model calls in this case.
+                    throw e;
+                }
             }
             if (i + 1 < attempts && config.kieRetryDelayMs > 0) {
                 try {
@@ -2059,6 +2109,15 @@ public class ShopifyBot extends TelegramLongPollingBot {
             throw lastIo;
         }
         throw new IOException("No AI response");
+    }
+
+    private boolean isTimeoutError(Throwable error) {
+        if (error == null) return false;
+        if (error instanceof java.io.InterruptedIOException) return true;
+        String msg = error.getMessage();
+        if (msg == null) return false;
+        String lower = msg.toLowerCase(Locale.ROOT);
+        return lower.contains("timeout") || lower.contains("timed out");
     }
 
     private List<AiProvider> buildAiProviders() {
@@ -2269,7 +2328,6 @@ public class ShopifyBot extends TelegramLongPollingBot {
         workers.submit(() -> {
             try {
                 PublishedDraft result = publishDraftInternal(draft);
-                resetSession(session);
                 StringBuilder sb = new StringBuilder("✅ Товар опубликован.\n");
                 sb.append("Название: ").append(result.title).append("\n");
                 sb.append("Цена: ").append(formatRsd(result.priceRsd)).append(" RSD");
@@ -2279,7 +2337,13 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 if (draft.mode == DraftMode.POS_ONLY) {
                     sb.append("\nРежим: Point of Sale");
                 }
-                sendWelcomeMenu(chatId, sb.toString());
+                if (advanceToNextDraft(session)) {
+                    sendText(chatId, sb + "\n\n➡️ Переходим к следующему товару.");
+                    sendDraftPreview(chatId, session, true);
+                } else {
+                    resetSession(session);
+                    sendWelcomeMenu(chatId, sb + "\n\n✅ Все товары обработаны.");
+                }
             } catch (Exception e) {
                 log.error("Failed to publish draft now", e);
                 sendText(chatId, "❌ Ошибка публикации: " + e.getMessage());
@@ -2472,14 +2536,36 @@ public class ShopifyBot extends TelegramLongPollingBot {
             ScheduledPayload payload = ScheduledPayload.fromDraft(draft);
             long publishAtEpoch = publishLocal.atZone(ZoneId.of("Europe/Belgrade")).toEpochSecond();
             long taskId = db.enqueueScheduledPost(draft.mode.name(), mapper.writeValueAsString(payload), publishAtEpoch, chatId);
-            resetSession(session);
-            sendWelcomeMenu(chatId,
-                    "✅ Пост поставлен в очередь.\nID: " + taskId +
-                            "\nПубликация: " + publishLocal.format(BELGRADE_DT_SHOW) + " (Belgrade)");
+            String status = "✅ Пост поставлен в очередь.\nID: " + taskId +
+                    "\nПубликация: " + publishLocal.format(BELGRADE_DT_SHOW) + " (Belgrade)";
+            if (advanceToNextDraft(session)) {
+                sendText(chatId, status + "\n\n➡️ Переходим к следующему товару.");
+                sendDraftPreview(chatId, session, true);
+            } else {
+                resetSession(session);
+                sendWelcomeMenu(chatId, status + "\n\n✅ Все товары обработаны.");
+            }
         } catch (Exception e) {
             log.warn("Failed to enqueue scheduled draft", e);
             sendText(chatId, "❌ Не удалось поставить в очередь: " + e.getMessage());
         }
+    }
+
+    private boolean advanceToNextDraft(AdminSession session) {
+        if (session.draftQueue.isEmpty() || session.draftQueueIndex < 0) {
+            return false;
+        }
+        int next = session.draftQueueIndex + 1;
+        if (next >= session.draftQueue.size()) {
+            session.draftQueue.clear();
+            session.draftQueueIndex = -1;
+            session.draft = null;
+            return false;
+        }
+        session.draftQueueIndex = next;
+        session.draft = session.draftQueue.get(next);
+        session.state = AdminState.DRAFT_EDIT_CHOICE;
+        return true;
     }
 
     private void sendScheduledPostsPage(long chatId, int page) {
@@ -2773,6 +2859,9 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private void resetSession(AdminSession session) {
         session.state = AdminState.IDLE;
         session.pendingPhotoFileIds.clear();
+        session.aiPhotoGroups.clear();
+        session.draftQueue.clear();
+        session.draftQueueIndex = -1;
         session.selectedProductId = 0;
         session.searchScope = null;
         session.draft = null;
@@ -3034,6 +3123,9 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private static class AdminSession {
         AdminState state = AdminState.IDLE;
         final List<String> pendingPhotoFileIds = new ArrayList<>();
+        final java.util.LinkedHashMap<String, List<String>> aiPhotoGroups = new java.util.LinkedHashMap<>();
+        final List<DraftData> draftQueue = new ArrayList<>();
+        int draftQueueIndex = -1;
         long selectedProductId = 0;
         ProductSearchScope searchScope;
         DraftData draft;
@@ -3670,6 +3762,9 @@ public class ShopifyBot extends TelegramLongPollingBot {
             } catch (IOException e) {
                 lastIo = e;
                 log.warn("AI model {} failed (attempt {}/{}): {}", modelName, attempt, attempts, e.getMessage());
+                if (isTimeoutError(e)) {
+                    throw e;
+                }
             } catch (Exception e) {
                 log.warn("AI model {} unexpected failure (attempt {}/{}): {}", modelName, attempt, attempts, e.getMessage());
             }

@@ -87,7 +87,7 @@ public class Config {
         this.kieEndpointOverride = getenv("KIE_ENDPOINT", "");
         this.kieFallbackEndpointOverride = getenv("KIE_FALLBACK_ENDPOINT", "");
         this.kieSecondFallbackEndpointOverride = getenv("KIE_SECOND_FALLBACK_ENDPOINT", "");
-        this.kieTimeout = Duration.ofSeconds(parseLong(getenv("KIE_TIMEOUT_SECONDS", "90"), 90));
+        this.kieTimeout = Duration.ofSeconds(parseLong(getenv("KIE_TIMEOUT_SECONDS", "180"), 180));
         this.kieRetryAttempts = (int) parseLong(getenv("KIE_RETRY_ATTEMPTS", "10"), 10);
         this.kieRetryDelayMs = parseLong(getenv("KIE_RETRY_DELAY_MS", "1000"), 1000);
 

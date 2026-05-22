@@ -3625,11 +3625,11 @@ public class ShopifyBot extends TelegramLongPollingBot {
             try {
                 Classification result = kie.classify(text, images, explicitHint, provider.model, provider.endpoint);
                 last = result;
-                if (result != null && result.categories != null && !result.categories.isEmpty()) {
-                    log.info("AI model {} success after {} attempt(s), categories={}", modelName, attempt, result.categories.size());
-                    return result;
-                }
-                log.warn("AI model {} returned empty categories (attempt {}/{})", modelName, attempt, attempts);
+                int categoriesCount = (result == null || result.categories == null) ? 0 : result.categories.size();
+                log.info("AI model {} success after {} attempt(s), categories={}", modelName, attempt, categoriesCount);
+                // Do not continue to fallback when primary model already responded successfully.
+                // Empty categories are handled later by default category resolution.
+                return result == null ? new Classification() : result;
             } catch (IOException e) {
                 lastIo = e;
                 log.warn("AI model {} failed (attempt {}/{}): {}", modelName, attempt, attempts, e.getMessage());

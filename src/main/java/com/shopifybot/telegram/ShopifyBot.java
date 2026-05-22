@@ -1427,6 +1427,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
                         .append(" RSD");
                 if (articleEnabled && card.article != null && !card.article.isBlank()) {
                     sb.append(" | Artikal: ").append(card.article);
+                } else if (card.size != null && !card.size.isBlank()) {
+                    sb.append(" | Vel - ").append(card.size);
                 }
                 sb
                         .append(" | ")
@@ -1528,6 +1530,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
                         .append(" RSD");
                 if (articleEnabled && card.article != null && !card.article.isBlank()) {
                     sb.append(" | Artikal: ").append(card.article);
+                } else if (card.size != null && !card.size.isBlank()) {
+                    sb.append(" | Vel - ").append(card.size);
                 }
             }
         }
@@ -1813,17 +1817,58 @@ public class ShopifyBot extends TelegramLongPollingBot {
         LocalDate today = LocalDate.now(discountZone == null ? ZoneId.systemDefault() : discountZone);
         boolean enabled = isDiscountsEnabled();
         String phase = describeDiscountStage(today);
+        String dayInfo = describeDiscountDay(today);
         String dateLabel = today.format(DateTimeFormatter.ofPattern("dd.MM.yyyy"));
+        List<ProductCard> cards = db.listVisibleProducts(5000, 0);
 
         StringBuilder text = new StringBuilder();
         text.append("🧾 Скидки\n");
         text.append("Статус: ").append(enabled ? "включены ✅" : "отключены ⏸").append("\n");
         text.append("Сегодня: ").append(dateLabel).append("\n");
+        text.append("День цикла: ").append(dayInfo).append("\n");
         text.append("Текущий этап: ").append(phase).append("\n");
         text.append("\n");
         text.append("Автосистема применяет изменения 1 раз в день.\n");
         text.append("Базовая прогрессия по возрасту: 0% → 15% → 30% → 50%.\n");
         text.append("Последняя неделя месяца: Пн 20%, Вт 30%, Ср 40%, Чт 50%, Пт 500, Сб/Вс 350.");
+        text.append("\n\nТовары в работе: ").append(cards.size());
+        if (cards.isEmpty()) {
+            text.append("\nСписок пуст.");
+        } else {
+            boolean articleEnabled = isArticleEnabled();
+            int limit = Math.min(cards.size(), 120);
+            for (int i = 0; i < limit; i++) {
+                ProductCard card = cards.get(i);
+                DiscountTarget target = calculateDiscountTarget(card, today);
+                int currentDiscount = card.fixedPriceRsd != null
+                        ? discountPercentByFixed(card.basePriceRsd, card.fixedPriceRsd)
+                        : card.discountPercent;
+                text.append("\n")
+                        .append(i + 1)
+                        .append(". ")
+                        .append(card.title)
+                        .append(" | ")
+                        .append(formatRsd(card.currentPriceRsd))
+                        .append(" RSD");
+                if (articleEnabled && card.article != null && !card.article.isBlank()) {
+                    text.append(" | Artikal: ").append(card.article);
+                } else if (card.size != null && !card.size.isBlank()) {
+                    text.append(" | Vel - ").append(card.size);
+                }
+                text.append("\n   текущая скидка: ").append(currentDiscount).append("%");
+                if (target != null) {
+                    text.append(" | авто сегодня: ").append(target.discountPercent).append("%");
+                    if (target.fixedPriceRsd != null) {
+                        text.append(" (фикс ").append(formatRsd(target.fixedPriceRsd)).append(")");
+                    } else {
+                        text.append(" (").append(formatRsd(target.currentPriceRsd)).append(" RSD)");
+                    }
+                }
+            }
+            if (cards.size() > limit) {
+                text.append("\n… и еще ").append(cards.size() - limit).append(" товаров.");
+            }
+        }
         if (statusMessage != null && !statusMessage.isBlank()) {
             text.append("\n\n").append(statusMessage);
         }
@@ -1878,6 +1923,34 @@ public class ShopifyBot extends TelegramLongPollingBot {
         return "последняя неделя: все по 350";
     }
 
+    private String describeDiscountDay(LocalDate today) {
+        String dow;
+        switch (today.getDayOfWeek()) {
+            case MONDAY:
+                dow = "Пн";
+                break;
+            case TUESDAY:
+                dow = "Вт";
+                break;
+            case WEDNESDAY:
+                dow = "Ср";
+                break;
+            case THURSDAY:
+                dow = "Чт";
+                break;
+            case FRIDAY:
+                dow = "Пт";
+                break;
+            case SATURDAY:
+                dow = "Сб";
+                break;
+            default:
+                dow = "Вс";
+                break;
+        }
+        return dow + ", день месяца " + today.getDayOfMonth();
+    }
+
     private void sendPhotoUploadPrompt(long chatId, int photoCount) {
         String text = "📸 Добавление товара\n\n" +
                 "Загрузите до 9 фото.\n" +
@@ -1901,6 +1974,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 "Выберите способ добавления товара:",
                 inlineSingleColumn(
                         button("📸 По фото (ИИ)", CB_ADD_PRODUCT_AI),
+                        button("🧾 Без фото (POS)", CB_WITHOUT_PHOTO),
                         button("📝 Обычным способом", CB_ADD_PRODUCT_OLD),
                         button("⬅ Назад в меню", CB_MENU)
                 ));
@@ -2816,7 +2890,6 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private InlineKeyboardMarkup buildMainInlineKeyboard() {
         return inlineSingleColumn(
                 button("➕ Добавить товар", CB_ADD_PRODUCT),
-                button("🧾 Без фото (POS)", CB_WITHOUT_PHOTO),
                 button("📅 Отложенные посты", CB_SCHEDULED_POSTS),
                 button("✏️ Редактировать пост", CB_EDIT_POST),
                 button("📦 Список товаров", CB_PRODUCTS),

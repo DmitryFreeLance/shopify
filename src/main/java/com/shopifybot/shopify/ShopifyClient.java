@@ -348,6 +348,20 @@ public class ShopifyClient {
         return ids;
     }
 
+    public List<PublicationSummary> listPublications() throws IOException {
+        String query = "{ publications(first: 50) { edges { node { id name } } } }";
+        JsonNode root = graphQL(query);
+        List<PublicationSummary> items = new ArrayList<>();
+        for (JsonNode edge : root.path("data").path("publications").path("edges")) {
+            JsonNode node = edge.path("node");
+            items.add(new PublicationSummary(
+                    node.path("id").asText(""),
+                    node.path("name").asText("")
+            ));
+        }
+        return items;
+    }
+
     public void publishProductToAll(long productId) throws IOException {
         List<String> publications = listPublicationIds();
         if (publications.isEmpty()) return;
@@ -358,6 +372,42 @@ public class ShopifyClient {
             variables.put("id", productGid);
             variables.put("pub", pubId);
             graphQL(mutation, variables);
+        }
+    }
+
+    public void publishProductToPosOnly(long productId) throws IOException {
+        List<PublicationSummary> publications = listPublications();
+        if (publications.isEmpty()) return;
+        String productGid = "gid://shopify/Product/" + productId;
+        String posPubId = null;
+        for (PublicationSummary pub : publications) {
+            String name = pub.name == null ? "" : pub.name.toLowerCase();
+            if (name.contains("point of sale") || name.equals("pos") || name.contains("point of sale (pos)")) {
+                posPubId = pub.id;
+                break;
+            }
+        }
+        if (posPubId == null || posPubId.isBlank()) {
+            throw new IOException("POS publication was not found in Shopify");
+        }
+
+        String publishMutation = "mutation Publish($id: ID!, $pub: ID!) { publishablePublish(id: $id, input: [{publicationId: $pub}]) { userErrors { field message } } }";
+        ObjectNode pubVars = mapper.createObjectNode();
+        pubVars.put("id", productGid);
+        pubVars.put("pub", posPubId);
+        graphQL(publishMutation, pubVars);
+
+        String unpublishMutation = "mutation Unpublish($id: ID!, $pub: ID!) { publishableUnpublish(id: $id, input: {publicationId: $pub}) { userErrors { field message } } }";
+        for (PublicationSummary pub : publications) {
+            if (pub.id == null || pub.id.isBlank() || pub.id.equals(posPubId)) continue;
+            ObjectNode unpubVars = mapper.createObjectNode();
+            unpubVars.put("id", productGid);
+            unpubVars.put("pub", pub.id);
+            try {
+                graphQL(unpublishMutation, unpubVars);
+            } catch (Exception e) {
+                log.warn("Failed to unpublish product {} from publication {}", productId, pub.name, e);
+            }
         }
     }
 
@@ -612,6 +662,16 @@ public class ShopifyClient {
         public MenuSummary(String handle, String title) {
             this.handle = handle;
             this.title = title;
+        }
+    }
+
+    public static class PublicationSummary {
+        public final String id;
+        public final String name;
+
+        public PublicationSummary(String id, String name) {
+            this.id = id;
+            this.name = name;
         }
     }
 

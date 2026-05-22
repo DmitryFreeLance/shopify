@@ -1,12 +1,14 @@
 package com.shopifybot.telegram;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.shopifybot.Config;
 import com.shopifybot.ai.CategorySelection;
 import com.shopifybot.ai.Classification;
 import com.shopifybot.ai.KieAiClient;
 import com.shopifybot.db.Database;
 import com.shopifybot.db.Database.ProductCard;
-import com.shopifybot.db.Database.PostRef;
 import com.shopifybot.db.Database.UserRecord;
 import com.shopifybot.shopify.ShopifyClient;
 import com.shopifybot.shopify.ShopifyCollections;
@@ -43,9 +45,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.YearMonth;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -53,6 +57,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -68,6 +73,10 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private static final String CB_MENU = "MENU";
     private static final String CB_NOOP = "NOOP";
     private static final String CB_ADD_PRODUCT = "OPEN:ADD_PRODUCT";
+    private static final String CB_ADD_PRODUCT_OLD = "OPEN:ADD_PRODUCT_OLD";
+    private static final String CB_ADD_PRODUCT_AI = "OPEN:ADD_PRODUCT_AI";
+    private static final String CB_WITHOUT_PHOTO = "OPEN:WITHOUT_PHOTO";
+    private static final String CB_SCHEDULED_POSTS = "OPEN:SCHEDULED_POSTS";
     private static final String CB_PRODUCTS = "OPEN:PRODUCTS";
     private static final String CB_RESERVE = "OPEN:RESERVE";
     private static final String CB_UNRESERVE = "OPEN:UNRESERVE";
@@ -88,8 +97,17 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private static final String CB_SEARCH_SOLD = "SEARCH:SOLD";
     private static final String CB_SEARCH_MANUAL = "SEARCH:MANUAL";
     private static final String CB_SEARCH_EDIT = "SEARCH:EDIT";
+    private static final String CB_DRAFT_EDIT = "DRAFT:EDIT";
+    private static final String CB_DRAFT_READY = "DRAFT:READY";
+    private static final String CB_DRAFT_FIELD_BRAND = "DRAFT:FIELD:BRAND";
+    private static final String CB_DRAFT_FIELD_SIZE = "DRAFT:FIELD:SIZE";
+    private static final String CB_DRAFT_FIELD_PRICE = "DRAFT:FIELD:PRICE";
+    private static final String CB_DRAFT_FIELD_ARTICLE = "DRAFT:FIELD:ARTICLE";
+    private static final String CB_DRAFT_PUBLISH_NOW = "DRAFT:PUBLISH_NOW";
+    private static final String CB_DRAFT_PUBLISH_TIME = "DRAFT:PUBLISH_TIME";
     private static final String META_DISCOUNT_ENABLED = "discount:enabled";
     private static final String META_DISCOUNT_RESET_START = "discount:reset_start_date";
+    private static final String META_ARTICLE_ENABLED = "article:enabled";
 
     private final Config config;
     private final Database db;
@@ -98,6 +116,9 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private final KieAiClient kie;
     private String shopCurrency;
     private ZoneId discountZone;
+    private final ObjectMapper mapper = new ObjectMapper();
+    private static final DateTimeFormatter BELGRADE_DT_INPUT = DateTimeFormatter.ofPattern("dd.MM, HH:mm");
+    private static final DateTimeFormatter BELGRADE_DT_SHOW = DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm");
 
     private final ExecutorService workers = Executors.newFixedThreadPool(2);
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
@@ -114,6 +135,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         scheduler.scheduleWithFixedDelay(this::processReadyMediaGroups, 15, 15, TimeUnit.SECONDS);
         scheduler.scheduleWithFixedDelay(this::syncDeletedProductsSafe, config.productSyncSeconds, config.productSyncSeconds, TimeUnit.SECONDS);
         scheduler.scheduleWithFixedDelay(this::syncDiscountsSafe, 60, Math.max(300, config.discountSyncSeconds), TimeUnit.SECONDS);
+        scheduler.scheduleWithFixedDelay(this::processScheduledPostsSafe, 20, 20, TimeUnit.SECONDS);
     }
 
     public void initialize() {
@@ -126,6 +148,9 @@ public class ShopifyBot extends TelegramLongPollingBot {
             }
             for (Long adminId : config.adminUserIds) {
                 db.addAdmin(adminId, "", null);
+            }
+            if (!db.hasMetaKey(META_ARTICLE_ENABLED)) {
+                db.setMeta(META_ARTICLE_ENABLED, "false");
             }
             log.info("Shop currency detected: {}", shopCurrency);
             log.info("Admins loaded: {}", config.adminUserIds.size());
@@ -221,8 +246,34 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
         if (CB_ADD_PRODUCT.equals(data)) {
             resetSession(session);
+            sendAddProductModeMenu(chatId);
+            answerCallback(callback, "");
+            return;
+        }
+        if (CB_ADD_PRODUCT_OLD.equals(data)) {
+            resetSession(session);
             session.state = AdminState.ADD_PRODUCT_PHOTOS;
             sendPhotoUploadPrompt(chatId, session.pendingPhotoFileIds.size());
+            answerCallback(callback, "");
+            return;
+        }
+        if (CB_ADD_PRODUCT_AI.equals(data)) {
+            resetSession(session);
+            session.state = AdminState.AI_DRAFT_PHOTOS;
+            sendAiPhotoPrompt(chatId, session.pendingPhotoFileIds.size(), false);
+            answerCallback(callback, "");
+            return;
+        }
+        if (CB_WITHOUT_PHOTO.equals(data)) {
+            resetSession(session);
+            session.state = AdminState.WITHOUT_PHOTO_PHOTOS;
+            sendAiPhotoPrompt(chatId, session.pendingPhotoFileIds.size(), true);
+            answerCallback(callback, "");
+            return;
+        }
+        if (CB_SCHEDULED_POSTS.equals(data)) {
+            resetSession(session);
+            sendScheduledPostsPage(chatId, 0);
             answerCallback(callback, "");
             return;
         }
@@ -305,13 +356,115 @@ public class ShopifyBot extends TelegramLongPollingBot {
             answerCallback(callback, "");
             return;
         }
+        if (CB_DRAFT_EDIT.equals(data)) {
+            if (session.draft == null) {
+                sendWelcomeMenu(chatId, "⚠️ Черновик не найден. Начните заново.");
+                answerCallback(callback, "");
+                return;
+            }
+            session.state = AdminState.DRAFT_EDIT_CHOICE;
+            List<InlineKeyboardButton> editButtons = new ArrayList<>();
+            editButtons.add(button("Бренд", CB_DRAFT_FIELD_BRAND));
+            editButtons.add(button("Размер", CB_DRAFT_FIELD_SIZE));
+            editButtons.add(button("Цена", CB_DRAFT_FIELD_PRICE));
+            if (isArticleEnabled()) {
+                editButtons.add(button("Артикль", CB_DRAFT_FIELD_ARTICLE));
+            }
+            editButtons.add(button("Отменить", CB_CANCEL_FLOW));
+            sendText(chatId,
+                    "Что редактировать?",
+                    inlineSingleColumn(editButtons.toArray(new InlineKeyboardButton[0])));
+            answerCallback(callback, "");
+            return;
+        }
+        if (CB_DRAFT_READY.equals(data)) {
+            if (session.draft == null) {
+                sendWelcomeMenu(chatId, "⚠️ Черновик не найден. Начните заново.");
+                answerCallback(callback, "");
+                return;
+            }
+            session.state = AdminState.DRAFT_PUBLISH_CHOICE;
+            sendText(chatId,
+                    "Когда опубликовать?",
+                    inlineSingleColumn(
+                            button("Сейчас", CB_DRAFT_PUBLISH_NOW),
+                            button("Ко времени", CB_DRAFT_PUBLISH_TIME),
+                            button("Отменить", CB_CANCEL_FLOW)
+                    ));
+            answerCallback(callback, "");
+            return;
+        }
+        if (CB_DRAFT_PUBLISH_NOW.equals(data)) {
+            if (session.draft == null) {
+                sendWelcomeMenu(chatId, "⚠️ Черновик не найден. Начните заново.");
+                answerCallback(callback, "");
+                return;
+            }
+            publishDraftNow(chatId, session);
+            answerCallback(callback, "");
+            return;
+        }
+        if (CB_DRAFT_PUBLISH_TIME.equals(data)) {
+            if (session.draft == null) {
+                sendWelcomeMenu(chatId, "⚠️ Черновик не найден. Начните заново.");
+                answerCallback(callback, "");
+                return;
+            }
+            session.state = AdminState.DRAFT_SCHEDULE_INPUT;
+            sendText(chatId,
+                    "Введите дату и время по Белграду в формате: 22.05, 20:00",
+                    inlineSingleColumn(
+                            button("Отменить", CB_CANCEL_FLOW)
+                    ));
+            answerCallback(callback, "");
+            return;
+        }
+        if (CB_DRAFT_FIELD_BRAND.equals(data)) {
+            session.state = AdminState.DRAFT_EDIT_BRAND_INPUT;
+            sendText(chatId, "Введите новый бренд:", inlineSingleColumn(button("Отменить", CB_CANCEL_FLOW)));
+            answerCallback(callback, "");
+            return;
+        }
+        if (CB_DRAFT_FIELD_SIZE.equals(data)) {
+            session.state = AdminState.DRAFT_EDIT_SIZE_INPUT;
+            sendText(chatId, "Введите новый размер:", inlineSingleColumn(button("Отменить", CB_CANCEL_FLOW)));
+            answerCallback(callback, "");
+            return;
+        }
+        if (CB_DRAFT_FIELD_PRICE.equals(data)) {
+            session.state = AdminState.DRAFT_EDIT_PRICE_INPUT;
+            sendText(chatId, "Введите новую цену в RSD:", inlineSingleColumn(button("Отменить", CB_CANCEL_FLOW)));
+            answerCallback(callback, "");
+            return;
+        }
+        if (CB_DRAFT_FIELD_ARTICLE.equals(data)) {
+            if (!isArticleEnabled()) {
+                answerCallback(callback, "Артикулы сейчас отключены");
+                return;
+            }
+            session.state = AdminState.DRAFT_EDIT_ARTICLE_INPUT;
+            sendText(chatId, "Введите новый артикул (8 цифр):", inlineSingleColumn(button("Отменить", CB_CANCEL_FLOW)));
+            answerCallback(callback, "");
+            return;
+        }
         if (CB_DONE_PHOTOS.equals(data)) {
-            if (session.state != AdminState.ADD_PRODUCT_PHOTOS) {
+            if (session.state != AdminState.ADD_PRODUCT_PHOTOS
+                    && session.state != AdminState.AI_DRAFT_PHOTOS
+                    && session.state != AdminState.WITHOUT_PHOTO_PHOTOS) {
                 session.state = AdminState.ADD_PRODUCT_PHOTOS;
             }
             if (session.pendingPhotoFileIds.isEmpty()) {
-                sendPhotoUploadPrompt(chatId, 0);
+                if (session.state == AdminState.AI_DRAFT_PHOTOS || session.state == AdminState.WITHOUT_PHOTO_PHOTOS) {
+                    sendAiPhotoPrompt(chatId, 0, session.state == AdminState.WITHOUT_PHOTO_PHOTOS);
+                } else {
+                    sendPhotoUploadPrompt(chatId, 0);
+                }
                 answerCallback(callback, "Сначала добавьте хотя бы одно фото");
+                return;
+            }
+            if (session.state == AdminState.AI_DRAFT_PHOTOS || session.state == AdminState.WITHOUT_PHOTO_PHOTOS) {
+                buildDraftFromAi(chatId, session, session.state == AdminState.WITHOUT_PHOTO_PHOTOS);
+                answerCallback(callback, "");
                 return;
             }
             session.state = AdminState.ADD_PRODUCT_DESCRIPTION;
@@ -325,8 +478,12 @@ public class ShopifyBot extends TelegramLongPollingBot {
             return;
         }
         if (CB_BACK_TO_PHOTOS.equals(data)) {
-            session.state = AdminState.ADD_PRODUCT_PHOTOS;
-            sendPhotoUploadPrompt(chatId, session.pendingPhotoFileIds.size());
+            if (session.state == AdminState.AI_DRAFT_PHOTOS || session.state == AdminState.WITHOUT_PHOTO_PHOTOS) {
+                sendAiPhotoPrompt(chatId, session.pendingPhotoFileIds.size(), session.state == AdminState.WITHOUT_PHOTO_PHOTOS);
+            } else {
+                session.state = AdminState.ADD_PRODUCT_PHOTOS;
+                sendPhotoUploadPrompt(chatId, session.pendingPhotoFileIds.size());
+            }
             answerCallback(callback, "");
             return;
         }
@@ -369,6 +526,17 @@ public class ShopifyBot extends TelegramLongPollingBot {
             session.state = AdminState.ARTICLE_SEARCH_INPUT;
             session.searchScope = ProductSearchScope.EDIT;
             sendArticleSearchPrompt(chatId);
+            answerCallback(callback, "");
+            return;
+        }
+        if (data.startsWith("PAGE:SCHEDULED:")) {
+            int page;
+            try {
+                page = Integer.parseInt(data.substring("PAGE:SCHEDULED:".length()));
+            } catch (NumberFormatException e) {
+                page = 0;
+            }
+            sendScheduledPostsPage(chatId, page);
             answerCallback(callback, "");
             return;
         }
@@ -458,23 +626,42 @@ public class ShopifyBot extends TelegramLongPollingBot {
             sendDiscountsDashboard(chatId);
             return;
         }
+        if (text.toLowerCase(Locale.ROOT).startsWith("/articul")) {
+            handleArticulCommand(chatId, text);
+            return;
+        }
         if ("/cancel".equalsIgnoreCase(text)) {
             resetSession(session);
             sendWelcomeMenu(chatId);
             return;
         }
 
-        if (session.state == AdminState.ADD_PRODUCT_PHOTOS) {
+        if (session.state == AdminState.ADD_PRODUCT_PHOTOS
+                || session.state == AdminState.AI_DRAFT_PHOTOS
+                || session.state == AdminState.WITHOUT_PHOTO_PHOTOS) {
+            boolean withoutPhoto = session.state == AdminState.WITHOUT_PHOTO_PHOTOS;
             if (message.getPhoto() != null && !message.getPhoto().isEmpty()) {
                 if (session.pendingPhotoFileIds.size() >= 9) {
-                    sendPhotoUploadPrompt(chatId, session.pendingPhotoFileIds.size());
+                    if (session.state == AdminState.ADD_PRODUCT_PHOTOS) {
+                        sendPhotoUploadPrompt(chatId, session.pendingPhotoFileIds.size());
+                    } else {
+                        sendAiPhotoPrompt(chatId, session.pendingPhotoFileIds.size(), withoutPhoto);
+                    }
                     return;
                 }
                 PhotoSize best = selectBestPhoto(message.getPhoto());
                 session.pendingPhotoFileIds.add(best.getFileId());
-                sendPhotoUploadPrompt(chatId, session.pendingPhotoFileIds.size());
+                if (session.state == AdminState.ADD_PRODUCT_PHOTOS) {
+                    sendPhotoUploadPrompt(chatId, session.pendingPhotoFileIds.size());
+                } else {
+                    sendAiPhotoPrompt(chatId, session.pendingPhotoFileIds.size(), withoutPhoto);
+                }
             } else {
-                sendPhotoUploadPrompt(chatId, session.pendingPhotoFileIds.size());
+                if (session.state == AdminState.ADD_PRODUCT_PHOTOS) {
+                    sendPhotoUploadPrompt(chatId, session.pendingPhotoFileIds.size());
+                } else {
+                    sendAiPhotoPrompt(chatId, session.pendingPhotoFileIds.size(), withoutPhoto);
+                }
             }
             return;
         }
@@ -489,7 +676,19 @@ public class ShopifyBot extends TelegramLongPollingBot {
                         ));
                 return;
             }
-            createProductFromAdminInput(chatId, session, text);
+            DraftData draft = buildDraftFromManualDescription(chatId, session, text);
+            if (draft == null) {
+                return;
+            }
+            session.draft = draft;
+            session.state = AdminState.DRAFT_PUBLISH_CHOICE;
+            sendText(chatId,
+                    "Когда опубликовать?",
+                    inlineSingleColumn(
+                            button("Сейчас", CB_DRAFT_PUBLISH_NOW),
+                            button("Ко времени", CB_DRAFT_PUBLISH_TIME),
+                            button("Отменить", CB_CANCEL_FLOW)
+                    ));
             return;
         }
 
@@ -578,32 +777,50 @@ public class ShopifyBot extends TelegramLongPollingBot {
             return;
         }
 
+        if (session.state == AdminState.DRAFT_EDIT_BRAND_INPUT
+                || session.state == AdminState.DRAFT_EDIT_SIZE_INPUT
+                || session.state == AdminState.DRAFT_EDIT_PRICE_INPUT
+                || session.state == AdminState.DRAFT_EDIT_ARTICLE_INPUT) {
+            applyDraftFieldEdit(chatId, session, text);
+            return;
+        }
+
+        if (session.state == AdminState.DRAFT_SCHEDULE_INPUT) {
+            queueDraftByDatetime(chatId, session, text);
+            return;
+        }
+
         sendWelcomeMenu(chatId, "Используйте кнопки ниже.");
     }
 
     private void createProductFromAdminInput(long chatId, AdminSession session, String rawDescription) {
+        boolean articleEnabled = isArticleEnabled();
         String article = TextParser.extractArticle(rawDescription);
-        if (article == null || !article.matches("\\d{8}")) {
-            sendText(chatId,
-                    "❗ Не найден корректный артикул (8 цифр).\nПример: Artikal: 56789356",
-                    inlineSingleColumn(
-                            button("Назад", CB_BACK_TO_PHOTOS),
-                            button("Отменить", CB_CANCEL_FLOW)
-                    ));
-            return;
-        }
-        ProductCard existingByArticle = db.findProductCardByArticle(article);
-        if (existingByArticle != null) {
-            sendText(chatId,
-                    "⚠️ Этот артикул уже используется.\n" +
-                            "Товар: " + existingByArticle.title + "\n" +
-                            "Статус: " + statusLabel(existingByArticle.status) + "\n" +
-                            "Укажите другой артикул.",
-                    inlineSingleColumn(
-                            button("Назад", CB_BACK_TO_PHOTOS),
-                            button("Отменить", CB_CANCEL_FLOW)
-                    ));
-            return;
+        if (articleEnabled) {
+            if (article == null || !article.matches("\\d{8}")) {
+                sendText(chatId,
+                        "❗ Не найден корректный артикул (8 цифр).\nПример: Artikal: 56789356",
+                        inlineSingleColumn(
+                                button("Назад", CB_BACK_TO_PHOTOS),
+                                button("Отменить", CB_CANCEL_FLOW)
+                        ));
+                return;
+            }
+            ProductCard existingByArticle = db.findProductCardByArticle(article);
+            if (existingByArticle != null) {
+                sendText(chatId,
+                        "⚠️ Этот артикул уже используется.\n" +
+                                "Товар: " + existingByArticle.title + "\n" +
+                                "Статус: " + statusLabel(existingByArticle.status) + "\n" +
+                                "Укажите другой артикул.",
+                        inlineSingleColumn(
+                                button("Назад", CB_BACK_TO_PHOTOS),
+                                button("Отменить", CB_CANCEL_FLOW)
+                        ));
+                return;
+            }
+        } else {
+            article = generateInternalArticle();
         }
 
         String rsd = TextParser.extractRsd(rawDescription);
@@ -671,6 +888,10 @@ public class ShopifyBot extends TelegramLongPollingBot {
 
         final String finalTitle = title;
         final String finalSize = size;
+        final String finalArticle = article;
+        final boolean finalArticleEnabled = articleEnabled;
+        final double finalBasePrice = basePrice;
+        final String finalRawDescription = rawDescription;
         workers.submit(() -> {
             List<byte[]> images = new ArrayList<>();
             for (String fileId : photoFileIds) {
@@ -689,30 +910,34 @@ public class ShopifyBot extends TelegramLongPollingBot {
             if (explicit.entries.isEmpty()) {
                 explicit.add("Muško", null);
             }
-            String captionCore = buildProductCaption(finalTitle, finalSize, basePrice, basePrice, article, 0, null, "ACTIVE");
+            String captionCore = buildProductCaption(finalTitle, finalSize, finalBasePrice, finalBasePrice, finalArticle, 0, null, "ACTIVE");
             String telegramCaption = buildTelegramPostCaption(captionCore);
 
             long productId = 0;
             PublishResult pub = null;
             try {
-                ProductCard existing = db.findProductCardByArticle(article);
-                if (existing != null) {
-                    sendWelcomeMenu(chatId,
-                            "⚠️ Артикул " + article + " уже существует (" + statusLabel(existing.status) + ").\n" +
-                                    "Выберите другой артикул.");
-                    return;
+                if (finalArticleEnabled) {
+                    ProductCard existing = db.findProductCardByArticle(finalArticle);
+                    if (existing != null) {
+                        sendWelcomeMenu(chatId,
+                                "⚠️ Артикул " + finalArticle + " уже существует (" + statusLabel(existing.status) + ").\n" +
+                                        "Выберите другой артикул.");
+                        return;
+                    }
                 }
 
                 ShopifyClient.ProductPayload payload = new ShopifyClient.ProductPayload();
                 payload.title = finalTitle;
                 payload.bodyHtml = captionCore.replace("\n", "<br>");
-                payload.priceEur = formatPriceForShopify(basePrice);
+                payload.priceEur = formatPriceForShopify(finalBasePrice);
                 payload.size = finalSize;
                 payload.tags = buildTags(explicit, new Classification());
                 payload.productType = selectProductType(explicit);
                 payload.images = images;
-                payload.barcode = article;
-                payload.sku = article;
+                if (finalArticleEnabled) {
+                    payload.barcode = finalArticle;
+                    payload.sku = finalArticle;
+                }
 
                 productId = shopify.createProduct(payload);
                 if (config.shopifyPublishAll) {
@@ -767,10 +992,10 @@ public class ShopifyBot extends TelegramLongPollingBot {
                         pub.mediaGroupId,
                         finalTitle,
                         finalSize,
-                        rawDescription,
-                        article,
-                        basePrice,
-                        basePrice,
+                        finalRawDescription,
+                        finalArticle,
+                        finalBasePrice,
+                        finalBasePrice,
                         0,
                         null,
                         "ACTIVE",
@@ -778,8 +1003,10 @@ public class ShopifyBot extends TelegramLongPollingBot {
                         Instant.now().getEpochSecond()
                 ));
 
-                sendWelcomeMenu(chatId,
-                        "✅ Товар опубликован.\nНазвание: " + finalTitle + "\nЦена: " + formatRsd(basePrice) + " RSD\nАртикул: " + article);
+                String publishedText = finalArticleEnabled
+                        ? ("✅ Товар опубликован.\nНазвание: " + finalTitle + "\nЦена: " + formatRsd(finalBasePrice) + " RSD\nАртикул: " + finalArticle)
+                        : ("✅ Товар опубликован.\nНазвание: " + finalTitle + "\nЦена: " + formatRsd(finalBasePrice) + " RSD");
+                sendWelcomeMenu(chatId, publishedText);
             } catch (Exception e) {
                 log.error("Failed to create product from admin flow", e);
                 String errorText = e.getMessage() == null ? "" : e.getMessage();
@@ -804,6 +1031,105 @@ public class ShopifyBot extends TelegramLongPollingBot {
         });
     }
 
+    private DraftData buildDraftFromManualDescription(long chatId, AdminSession session, String rawDescription) {
+        boolean articleEnabled = isArticleEnabled();
+        String article = TextParser.extractArticle(rawDescription);
+        if (articleEnabled) {
+            if (article == null || !article.matches("\\d{8}")) {
+                sendText(chatId,
+                        "❗ Не найден корректный артикул (8 цифр).\nПример: Artikal: 56789356",
+                        inlineSingleColumn(
+                                button("Назад", CB_BACK_TO_PHOTOS),
+                                button("Отменить", CB_CANCEL_FLOW)
+                        ));
+                return null;
+            }
+            ProductCard existingByArticle = db.findProductCardByArticle(article);
+            if (existingByArticle != null && ("ACTIVE".equals(existingByArticle.status) || "RESERVED".equals(existingByArticle.status) || "POS_ONLY".equals(existingByArticle.status))) {
+                sendText(chatId,
+                        "⚠️ Этот артикул уже используется.\n" +
+                                "Товар: " + existingByArticle.title + "\n" +
+                                "Статус: " + statusLabel(existingByArticle.status) + "\n" +
+                                "Укажите другой артикул.",
+                        inlineSingleColumn(
+                                button("Назад", CB_BACK_TO_PHOTOS),
+                                button("Отменить", CB_CANCEL_FLOW)
+                        ));
+                return null;
+            }
+        }
+
+        String rsd = TextParser.extractRsd(rawDescription);
+        if (rsd == null || rsd.isBlank()) {
+            sendText(chatId,
+                    "❗ Не удалось прочитать цену.\nУкажите строку вида: Cena - 1500 RSD",
+                    inlineSingleColumn(
+                            button("Назад", CB_BACK_TO_PHOTOS),
+                            button("Отменить", CB_CANCEL_FLOW)
+                    ));
+            return null;
+        }
+
+        double basePrice;
+        try {
+            basePrice = Double.parseDouble(rsd);
+        } catch (NumberFormatException e) {
+            sendText(chatId,
+                    "❗ Цена имеет неверный формат.\nПроверьте строку Cena.",
+                    inlineSingleColumn(
+                            button("Назад", CB_BACK_TO_PHOTOS),
+                            button("Отменить", CB_CANCEL_FLOW)
+                    ));
+            return null;
+        }
+        if (basePrice <= 0) {
+            sendText(chatId,
+                    "❗ Цена должна быть больше 0.",
+                    inlineSingleColumn(
+                            button("Назад", CB_BACK_TO_PHOTOS),
+                            button("Отменить", CB_CANCEL_FLOW)
+                    ));
+            return null;
+        }
+
+        String title = TextParser.extractTitle(rawDescription);
+        if (title == null || title.isBlank()) {
+            String[] lines = TextParser.normalizeNewlines(rawDescription).split("\\n");
+            for (String line : lines) {
+                if (!line.trim().isBlank()) {
+                    title = line.trim();
+                    break;
+                }
+            }
+        }
+        if (title == null || title.isBlank()) {
+            sendText(chatId,
+                    "❗ Не удалось определить название товара.\nДобавьте его в первую строку.",
+                    inlineSingleColumn(
+                            button("Назад", CB_BACK_TO_PHOTOS),
+                            button("Отменить", CB_CANCEL_FLOW)
+                    ));
+            return null;
+        }
+        String size = TextParser.extractSize(rawDescription);
+
+        if (session.pendingPhotoFileIds.isEmpty()) {
+            sendPhotoUploadPrompt(chatId, 0);
+            return null;
+        }
+
+        DraftData draft = new DraftData();
+        draft.mode = DraftMode.ONLINE_WITH_PHOTO;
+        draft.photoFileIds = new ArrayList<>(session.pendingPhotoFileIds);
+        draft.title = title;
+        draft.size = size;
+        draft.priceRsd = basePrice;
+        draft.article = articleEnabled ? article : "";
+        draft.status = "ACTIVE";
+        draft.rawDescription = rawDescription;
+        return draft;
+    }
+
     private void editProductFromAdminInput(long chatId, AdminSession session, String rawDescription) {
         ProductCard current = db.findProductCardById(session.selectedProductId);
         if (current == null) {
@@ -812,26 +1138,31 @@ public class ShopifyBot extends TelegramLongPollingBot {
             return;
         }
 
+        boolean articleEnabled = isArticleEnabled();
         String article = TextParser.extractArticle(rawDescription);
-        if (article == null || !article.matches("\\d{8}")) {
-            sendText(chatId,
-                    "❗ Не найден корректный артикул (8 цифр).\nПример: Artikal: 56789356",
-                    inlineSingleColumn(
-                            button("Отменить", CB_CANCEL_FLOW)
-                    ));
-            return;
-        }
-        ProductCard existingByArticle = db.findProductCardByArticle(article);
-        if (existingByArticle != null && existingByArticle.productId != current.productId) {
-            sendText(chatId,
-                    "⚠️ Этот артикул уже используется.\n" +
-                            "Товар: " + existingByArticle.title + "\n" +
-                            "Статус: " + statusLabel(existingByArticle.status) + "\n" +
-                            "Укажите другой артикул.",
-                    inlineSingleColumn(
-                            button("Отменить", CB_CANCEL_FLOW)
-                    ));
-            return;
+        if (articleEnabled) {
+            if (article == null || !article.matches("\\d{8}")) {
+                sendText(chatId,
+                        "❗ Не найден корректный артикул (8 цифр).\nПример: Artikal: 56789356",
+                        inlineSingleColumn(
+                                button("Отменить", CB_CANCEL_FLOW)
+                        ));
+                return;
+            }
+            ProductCard existingByArticle = db.findProductCardByArticle(article);
+            if (existingByArticle != null && existingByArticle.productId != current.productId) {
+                sendText(chatId,
+                        "⚠️ Этот артикул уже используется.\n" +
+                                "Товар: " + existingByArticle.title + "\n" +
+                                "Статус: " + statusLabel(existingByArticle.status) + "\n" +
+                                "Укажите другой артикул.",
+                        inlineSingleColumn(
+                                button("Отменить", CB_CANCEL_FLOW)
+                        ));
+                return;
+            }
+        } else {
+            article = current.article == null || current.article.isBlank() ? generateInternalArticle() : current.article;
         }
 
         String rsd = TextParser.extractRsd(rawDescription);
@@ -920,8 +1251,10 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 payload.tags = buildTags(explicit, new Classification());
                 payload.productType = selectProductType(explicit);
                 payload.imageUrls = imageUrls;
-                payload.barcode = finalArticle;
-                payload.sku = finalArticle;
+                if (articleEnabled) {
+                    payload.barcode = finalArticle;
+                    payload.sku = finalArticle;
+                }
 
                 newProductId = shopify.createProduct(payload);
                 if (config.shopifyPublishAll) {
@@ -996,8 +1329,10 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 ));
 
                 resetSession(session);
-                sendWelcomeMenu(chatId,
-                        "✅ Товар обновлен.\nНазвание: " + finalTitle + "\nЦена: " + formatRsd(finalBasePrice) + " RSD\nАртикул: " + finalArticle);
+                String updatedText = articleEnabled
+                        ? ("✅ Товар обновлен.\nНазвание: " + finalTitle + "\nЦена: " + formatRsd(finalBasePrice) + " RSD\nАртикул: " + finalArticle)
+                        : ("✅ Товар обновлен.\nНазвание: " + finalTitle + "\nЦена: " + formatRsd(finalBasePrice) + " RSD");
+                sendWelcomeMenu(chatId, updatedText);
             } catch (Exception e) {
                 log.error("Failed to edit product from admin flow", e);
                 if (newProductId > 0) {
@@ -1069,6 +1404,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
             sb.append("Список пуст.");
         } else {
             int startOrdinal = safePage * pageSize + 1;
+            boolean articleEnabled = isArticleEnabled();
             for (int i = 0; i < items.size(); i++) {
                 ProductCard card = items.get(i);
                 sb.append("\n")
@@ -1077,16 +1413,20 @@ public class ShopifyBot extends TelegramLongPollingBot {
                         .append(card.title)
                         .append(" | ")
                         .append(formatRsd(card.currentPriceRsd))
-                        .append(" RSD")
-                        .append(" | Artikal: ")
-                        .append(card.article)
+                        .append(" RSD");
+                if (articleEnabled && card.article != null && !card.article.isBlank()) {
+                    sb.append(" | Artikal: ").append(card.article);
+                }
+                sb
                         .append(" | ")
                         .append("RESERVED".equals(card.status) ? "REZERVISANO" : "AKTIVAN");
             }
         }
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         appendPaginationRows(rows, "PRODUCTS", safePage, pages);
-        rows.add(List.of(button("🔎 Поиск по артиклу", CB_SEARCH_PRODUCTS)));
+        if (isArticleEnabled()) {
+            rows.add(List.of(button("🔎 Поиск по артиклу", CB_SEARCH_PRODUCTS)));
+        }
         rows.add(List.of(button("⬅ Назад в меню", CB_MENU)));
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         markup.setKeyboard(rows);
@@ -1165,6 +1505,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
             sb.append("\nСписок пуст.");
         } else {
             int startOrdinal = safePage * pageSize + 1;
+            boolean articleEnabled = isArticleEnabled();
             for (int i = 0; i < items.size(); i++) {
                 ProductCard card = items.get(i);
                 sb.append("\n")
@@ -1173,8 +1514,10 @@ public class ShopifyBot extends TelegramLongPollingBot {
                         .append(card.title)
                         .append(" | ")
                         .append(formatRsd(card.currentPriceRsd))
-                        .append(" RSD | Artikal: ")
-                        .append(card.article);
+                        .append(" RSD");
+                if (articleEnabled && card.article != null && !card.article.isBlank()) {
+                    sb.append(" | Artikal: ").append(card.article);
+                }
             }
         }
 
@@ -1185,7 +1528,9 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 : "SOLD";
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         appendPaginationRows(rows, scope, safePage, pages);
-        rows.add(List.of(button("🔎 Поиск по артиклу", searchCallbackForScope(scope))));
+        if (isArticleEnabled()) {
+            rows.add(List.of(button("🔎 Поиск по артиклу", searchCallbackForScope(scope))));
+        }
         rows.add(List.of(button("⬅ Назад в меню", CB_MENU)));
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         markup.setKeyboard(rows);
@@ -1213,6 +1558,10 @@ public class ShopifyBot extends TelegramLongPollingBot {
     }
 
     private void sendArticleSearchPrompt(long chatId) {
+        if (!isArticleEnabled()) {
+            sendText(chatId, "Поиск по артиклу недоступен, пока артикулы отключены (/articul on).");
+            return;
+        }
         sendText(chatId,
                 "🔎 Введите артикул (8 цифр), например: 56789356",
                 inlineSingleColumn(
@@ -1221,6 +1570,10 @@ public class ShopifyBot extends TelegramLongPollingBot {
     }
 
     private void processArticleSearch(long chatId, AdminSession session, String article) {
+        if (!isArticleEnabled()) {
+            sendText(chatId, "Поиск по артиклу недоступен, пока артикулы отключены (/articul on).");
+            return;
+        }
         ProductSearchScope scope = session.searchScope == null ? ProductSearchScope.PRODUCTS : session.searchScope;
         Database.ProductCard card;
         Integer ordinal;
@@ -1391,7 +1744,9 @@ public class ShopifyBot extends TelegramLongPollingBot {
             lines.add("Vel - " + size);
         }
         lines.add("Cena - " + formatRsd(currentPriceRsd) + " RSD");
-        lines.add("Artikal: " + article);
+        if (isArticleEnabled() && article != null && !article.isBlank()) {
+            lines.add("Artikal: " + article);
+        }
         return String.join("\n", lines);
     }
 
@@ -1530,6 +1885,777 @@ public class ShopifyBot extends TelegramLongPollingBot {
         ));
     }
 
+    private void sendAddProductModeMenu(long chatId) {
+        sendText(chatId,
+                "Выберите способ добавления товара:",
+                inlineSingleColumn(
+                        button("📸 По фото (ИИ)", CB_ADD_PRODUCT_AI),
+                        button("📝 Обычным способом", CB_ADD_PRODUCT_OLD),
+                        button("⬅ Назад в меню", CB_MENU)
+                ));
+    }
+
+    private void sendAiPhotoPrompt(long chatId, int photoCount, boolean withoutPhotoMode) {
+        String text;
+        if (withoutPhotoMode) {
+            text = "🧾 Режим «Без фото»\n\n" +
+                    "Отправьте фото ценников (до 9 шт.).\n" +
+                    "Бот считает цену и артикул, затем покажет карточку для проверки.\n" +
+                    "Принято: " + photoCount + "/9.";
+        } else {
+            text = "🤖 Добавление товара по фото\n\n" +
+                    "Отправьте до 9 фото товара.\n" +
+                    "Бот автоматически заполнит карточку (бренд, размер, цена" +
+                    (isArticleEnabled() ? ", артикул" : "") +
+                    ").\n" +
+                    "Принято: " + photoCount + "/9.";
+        }
+        if (photoCount <= 0) {
+            text += "\n\nЗагрузите первое фото.";
+            sendText(chatId, text, inlineSingleColumn(
+                    button("Отменить", CB_CANCEL_FLOW)
+            ));
+            return;
+        }
+        text += "\n\nЕсли достаточно фото, нажмите «Готово».";
+        sendText(chatId, text, inlineSingleColumn(
+                button("Готово", CB_DONE_PHOTOS),
+                button("Отменить", CB_CANCEL_FLOW)
+        ));
+    }
+
+    private void buildDraftFromAi(long chatId, AdminSession session, boolean withoutPhotoMode) {
+        if (session.pendingPhotoFileIds.isEmpty()) {
+            sendAiPhotoPrompt(chatId, 0, withoutPhotoMode);
+            return;
+        }
+        List<String> fileIds = new ArrayList<>(session.pendingPhotoFileIds);
+        sendText(chatId, "⏳ Анализирую фото через ИИ...");
+        workers.submit(() -> {
+            try {
+                List<byte[]> images = new ArrayList<>();
+                for (String fileId : fileIds) {
+                    try {
+                        images.add(downloadFileBytes(fileId));
+                    } catch (Exception e) {
+                        log.warn("Failed to download image {} for AI draft", fileId, e);
+                    }
+                }
+                if (images.isEmpty()) {
+                    sendAiPhotoPrompt(chatId, 0, withoutPhotoMode);
+                    return;
+                }
+
+                DraftData draft = requestDraftFromAi(images, withoutPhotoMode);
+                draft.mode = withoutPhotoMode ? DraftMode.POS_ONLY : DraftMode.ONLINE_WITH_PHOTO;
+                draft.photoFileIds = new ArrayList<>(fileIds);
+                draft.status = "ACTIVE";
+                if (draft.title == null || draft.title.isBlank()) {
+                    draft.title = withoutPhotoMode ? "Без фото" : "Товар";
+                }
+                if (withoutPhotoMode) {
+                    draft.title = "Без фото";
+                    draft.size = "";
+                }
+                if (!isArticleEnabled()) {
+                    draft.article = generateInternalArticle();
+                } else {
+                    String digits = draft.article == null ? "" : draft.article.replaceAll("\\D", "");
+                    draft.article = digits.matches("\\d{8}") ? digits : "";
+                }
+                if (draft.priceRsd <= 0) {
+                    sendText(chatId,
+                            "❗ ИИ не смог корректно распознать цену. Загрузите более четкое фото ценника или выберите обычный способ.",
+                            inlineSingleColumn(
+                                    button("⬅ Назад в меню", CB_MENU),
+                                    button("Отменить", CB_CANCEL_FLOW)
+                            ));
+                    return;
+                }
+
+                session.draft = draft;
+                session.state = AdminState.DRAFT_EDIT_CHOICE;
+                sendDraftPreview(chatId, session, true);
+            } catch (Exception e) {
+                log.warn("Failed to build AI draft", e);
+                sendText(chatId,
+                        "❌ Не удалось распознать данные с фото: " + e.getMessage(),
+                        inlineSingleColumn(
+                                button("⬅ Назад в меню", CB_MENU),
+                                button("Отменить", CB_CANCEL_FLOW)
+                        ));
+            }
+        });
+    }
+
+    private DraftData requestDraftFromAi(List<byte[]> images, boolean withoutPhotoMode) throws IOException {
+        boolean articleEnabled = isArticleEnabled();
+        String prompt;
+        if (withoutPhotoMode) {
+            prompt = "Extract fields from price tag photos and return only JSON:\n" +
+                    "{\n" +
+                    "  \"brand\": \"Без фото\",\n" +
+                    "  \"size\": \"\",\n" +
+                    "  \"price_rsd\": \"number only\"" +
+                    (articleEnabled ? ",\n  \"article\": \"8 digits or empty\"\n" : "\n") +
+                    "}\n" +
+                    "No markdown, no extra text.";
+        } else {
+            prompt = "Extract product card fields from photos and return only JSON:\n" +
+                    "{\n" +
+                    "  \"brand\": \"title/brand\",\n" +
+                    "  \"size\": \"size text\",\n" +
+                    "  \"price_rsd\": \"number only\"" +
+                    (articleEnabled ? ",\n  \"article\": \"8 digits or empty\"\n" : "\n") +
+                    "}\n" +
+                    "No markdown, no extra text.";
+        }
+
+        IOException lastIo = null;
+        String[] models = new String[]{
+                config.kieModel,
+                config.kieFallbackModel
+        };
+        String[] endpoints = new String[]{
+                config.kieEndpointOverride,
+                config.kieFallbackEndpointOverride
+        };
+        int attempts = Math.max(2, config.kieRetryAttempts);
+        for (int i = 0; i < attempts; i++) {
+            int idx = i % models.length;
+            String model = models[idx];
+            String endpoint = endpoints[idx];
+            try {
+                String raw = kie.completeRaw(prompt, images, model, endpoint);
+                JsonNode node = parseAiJson(raw);
+                DraftData draft = new DraftData();
+                draft.title = readAiString(node, "brand", withoutPhotoMode ? "Без фото" : "Товар");
+                draft.size = readAiString(node, "size", "");
+                draft.priceRsd = parseAiPrice(node.path("price_rsd").asText(""));
+                draft.article = readAiString(node, "article", "");
+                if (withoutPhotoMode) {
+                    draft.title = "Без фото";
+                    draft.size = "";
+                }
+                return draft;
+            } catch (IOException e) {
+                lastIo = e;
+                log.warn("AI draft parse failed model={} attempt={}/{}: {}", model, i + 1, attempts, e.getMessage());
+            }
+            if (i + 1 < attempts && config.kieRetryDelayMs > 0) {
+                try {
+                    Thread.sleep(config.kieRetryDelayMs);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        }
+        if (lastIo != null) {
+            throw lastIo;
+        }
+        throw new IOException("No AI response");
+    }
+
+    private JsonNode parseAiJson(String raw) throws IOException {
+        String value = raw == null ? "" : raw.trim();
+        int start = value.indexOf('{');
+        int end = value.lastIndexOf('}');
+        if (start >= 0 && end > start) {
+            value = value.substring(start, end + 1);
+        }
+        return mapper.readTree(value);
+    }
+
+    private String readAiString(JsonNode node, String field, String fallback) {
+        String v = node.path(field).asText("");
+        if (v == null) v = "";
+        v = v.trim();
+        return v.isBlank() ? fallback : v;
+    }
+
+    private double parseAiPrice(String raw) {
+        Double price = parsePriceInput(raw);
+        if (price == null || price <= 0) {
+            return 0;
+        }
+        return price;
+    }
+
+    private void sendDraftPreview(long chatId, AdminSession session, boolean includePhotos) {
+        if (session.draft == null) {
+            sendWelcomeMenu(chatId, "⚠️ Черновик не найден.");
+            return;
+        }
+        DraftData draft = session.draft;
+        if (includePhotos && draft.mode == DraftMode.ONLINE_WITH_PHOTO && draft.photoFileIds != null && !draft.photoFileIds.isEmpty()) {
+            try {
+                if (draft.photoFileIds.size() == 1) {
+                    SendPhoto sendPhoto = new SendPhoto();
+                    sendPhoto.setChatId(chatId);
+                    sendPhoto.setPhoto(new InputFile(draft.photoFileIds.get(0)));
+                    sendPhoto.setCaption("🖼 Фото для публикации");
+                    execute(sendPhoto);
+                } else {
+                    SendMediaGroup mediaGroup = new SendMediaGroup();
+                    mediaGroup.setChatId(chatId);
+                    List<InputMedia> media = new ArrayList<>();
+                    for (int i = 0; i < draft.photoFileIds.size(); i++) {
+                        InputMediaPhoto photo = new InputMediaPhoto();
+                        photo.setMedia(draft.photoFileIds.get(i));
+                        if (i == 0) {
+                            photo.setCaption("🖼 Фото для публикации");
+                        }
+                        media.add(photo);
+                    }
+                    mediaGroup.setMedias(media);
+                    execute(mediaGroup);
+                }
+            } catch (Exception e) {
+                log.warn("Failed to send draft photo preview", e);
+            }
+        }
+
+        String preview = renderDraftPreviewText(draft);
+        sendText(chatId,
+                preview,
+                inlineSingleColumn(
+                        button("✏️ Редактировать", CB_DRAFT_EDIT),
+                        button("✅ Готово", CB_DRAFT_READY),
+                        button("Отменить", CB_CANCEL_FLOW)
+                ));
+    }
+
+    private String renderDraftPreviewText(DraftData draft) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("🧾 Проверьте карточку:\n\n");
+        sb.append(draft.title == null || draft.title.isBlank() ? "Товар" : draft.title).append("\n");
+        if (draft.size != null && !draft.size.isBlank()) {
+            sb.append("Vel - ").append(draft.size).append("\n");
+        }
+        sb.append("Cena - ").append(formatRsd(draft.priceRsd)).append(" RSD");
+        if (isArticleEnabled()) {
+            String article = draft.article == null ? "" : draft.article.trim();
+            if (article.matches("\\d{8}")) {
+                sb.append("\nArtikal: ").append(article);
+            } else {
+                sb.append("\nArtikal: [не распознан]");
+            }
+        }
+        if (draft.mode == DraftMode.ONLINE_WITH_PHOTO) {
+            String core = sb.substring("🧾 Проверьте карточку:\n\n".length());
+            sb.setLength(0);
+            sb.append("🧾 Проверьте карточку:\n\n")
+                    .append(buildTelegramPostCaption(core));
+        } else {
+            sb.append("\n\nТовар будет опубликован только в Point of Sale (без Telegram и без витрины интернет-магазина).");
+        }
+        return sb.toString();
+    }
+
+    private void applyDraftFieldEdit(long chatId, AdminSession session, String text) {
+        if (session.draft == null) {
+            sendWelcomeMenu(chatId, "⚠️ Черновик не найден. Начните заново.");
+            return;
+        }
+        DraftData draft = session.draft;
+        String value = text == null ? "" : text.trim();
+        if (session.state == AdminState.DRAFT_EDIT_BRAND_INPUT) {
+            if (value.isBlank()) {
+                sendText(chatId, "Введите непустой бренд/название.");
+                return;
+            }
+            draft.title = value;
+        } else if (session.state == AdminState.DRAFT_EDIT_SIZE_INPUT) {
+            draft.size = value;
+        } else if (session.state == AdminState.DRAFT_EDIT_PRICE_INPUT) {
+            Double price = parsePriceInput(value);
+            if (price == null || price <= 0) {
+                sendText(chatId, "Введите корректную цену, например: 1500");
+                return;
+            }
+            draft.priceRsd = price;
+        } else if (session.state == AdminState.DRAFT_EDIT_ARTICLE_INPUT) {
+            if (!isArticleEnabled()) {
+                sendText(chatId, "Артикулы сейчас отключены.");
+                return;
+            }
+            String article = value.replaceAll("\\D", "");
+            if (!article.matches("\\d{8}")) {
+                sendText(chatId, "Артикул должен содержать ровно 8 цифр.");
+                return;
+            }
+            ProductCard existing = db.findProductCardByArticle(article);
+            if (existing != null && ("ACTIVE".equals(existing.status) || "RESERVED".equals(existing.status) || "POS_ONLY".equals(existing.status))) {
+                sendText(chatId, "Этот артикул уже используется активным товаром.");
+                return;
+            }
+            draft.article = article;
+        }
+
+        session.state = AdminState.DRAFT_EDIT_CHOICE;
+        sendDraftPreview(chatId, session, false);
+    }
+
+    private void publishDraftNow(long chatId, AdminSession session) {
+        if (session.draft == null) {
+            sendWelcomeMenu(chatId, "⚠️ Черновик не найден. Начните заново.");
+            return;
+        }
+        DraftData draft = session.draft.copy();
+        if (draft.priceRsd <= 0) {
+            sendText(chatId, "❗ Цена должна быть больше 0. Отредактируйте карточку.");
+            return;
+        }
+        if (draft.mode == DraftMode.ONLINE_WITH_PHOTO && (draft.photoFileIds == null || draft.photoFileIds.isEmpty())) {
+            sendText(chatId, "❗ Для публикации онлайн нужен хотя бы один снимок.");
+            return;
+        }
+        if (isArticleEnabled()) {
+            String article = draft.article == null ? "" : draft.article.replaceAll("\\D", "");
+            if (!article.matches("\\d{8}")) {
+                sendText(chatId, "❗ Укажите артикул из 8 цифр (через «Редактировать»).");
+                return;
+            }
+            ProductCard existing = db.findProductCardByArticle(article);
+            if (existing != null && ("ACTIVE".equals(existing.status) || "RESERVED".equals(existing.status) || "POS_ONLY".equals(existing.status))) {
+                sendText(chatId, "❗ Этот артикул уже используется. Укажите другой.");
+                return;
+            }
+            draft.article = article;
+        } else {
+            draft.article = generateInternalArticle();
+        }
+
+        sendText(chatId, "⏳ Публикую товар, подождите 3-10 секунд...");
+        workers.submit(() -> {
+            try {
+                PublishedDraft result = publishDraftInternal(draft);
+                resetSession(session);
+                StringBuilder sb = new StringBuilder("✅ Товар опубликован.\n");
+                sb.append("Название: ").append(result.title).append("\n");
+                sb.append("Цена: ").append(formatRsd(result.priceRsd)).append(" RSD");
+                if (isArticleEnabled()) {
+                    sb.append("\nАртикул: ").append(result.article);
+                }
+                if (draft.mode == DraftMode.POS_ONLY) {
+                    sb.append("\nРежим: Point of Sale");
+                }
+                sendWelcomeMenu(chatId, sb.toString());
+            } catch (Exception e) {
+                log.error("Failed to publish draft now", e);
+                sendText(chatId, "❌ Ошибка публикации: " + e.getMessage());
+            }
+        });
+    }
+
+    private PublishedDraft publishDraftInternal(DraftData draft) throws Exception {
+        List<byte[]> images = new ArrayList<>();
+        if (draft.photoFileIds != null) {
+            for (String fileId : draft.photoFileIds) {
+                try {
+                    images.add(downloadFileBytes(fileId));
+                } catch (Exception e) {
+                    log.warn("Failed to download draft photo {}", fileId, e);
+                }
+            }
+        }
+        if (draft.mode == DraftMode.ONLINE_WITH_PHOTO && images.isEmpty()) {
+            throw new IOException("Не удалось загрузить фото товара");
+        }
+
+        String title = draft.title == null || draft.title.isBlank() ? (draft.mode == DraftMode.POS_ONLY ? "Без фото" : "Товар") : draft.title.trim();
+        String size = draft.size == null ? "" : draft.size.trim();
+        double price = draft.priceRsd;
+        String article = draft.article == null ? "" : draft.article.trim();
+        if (!isArticleEnabled()) {
+            article = generateInternalArticle();
+        }
+        if (isArticleEnabled() && !article.matches("\\d{8}")) {
+            throw new IOException("Артикул должен содержать 8 цифр");
+        }
+        if (isArticleEnabled()) {
+            ProductCard existing = db.findProductCardByArticle(article);
+            if (existing != null && ("ACTIVE".equals(existing.status) || "RESERVED".equals(existing.status) || "POS_ONLY".equals(existing.status))) {
+                throw new IOException("Артикул уже используется");
+            }
+        }
+
+        String status = draft.mode == DraftMode.POS_ONLY ? "POS_ONLY" : "ACTIVE";
+        String captionCore = buildProductCaption(title, size, price, price, article, 0, null, status);
+        String telegramCaption = buildTelegramPostCaption(captionCore);
+        CategorySelection explicit = TextParser.detectExplicitCategories(draft.rawDescription);
+        if (explicit.entries.isEmpty()) {
+            explicit.add("Muško", null);
+        }
+
+        ShopifyClient.ProductPayload payload = new ShopifyClient.ProductPayload();
+        payload.title = draft.mode == DraftMode.POS_ONLY ? "Без фото" : title;
+        payload.bodyHtml = captionCore.replace("\n", "<br>");
+        payload.priceEur = formatPriceForShopify(price);
+        payload.size = size;
+        payload.tags = buildTags(explicit, new Classification());
+        payload.productType = "Без фото".equals(payload.title) ? "Без фото" : selectProductType(explicit);
+        payload.images = images;
+        if (isArticleEnabled()) {
+            payload.barcode = article;
+            payload.sku = article;
+        }
+
+        long productId = 0;
+        PublishResult pub = null;
+        try {
+            productId = shopify.createProduct(payload);
+            if (draft.mode == DraftMode.POS_ONLY) {
+                shopify.publishProductToPosOnly(productId);
+            } else if (config.shopifyPublishAll) {
+                try {
+                    shopify.publishProductToAll(productId);
+                } catch (Exception e) {
+                    log.warn("Failed to publish product {} to all channels", productId, e);
+                }
+            }
+            for (CategorySelection.Entry entry : explicit.entries) {
+                for (String titleKey : collections.buildCollectionTitles(entry.section, entry.subcategory)) {
+                    Long id = collections.getCollectionId(titleKey);
+                    if (id != null) {
+                        try {
+                            shopify.addProductToCollection(productId, id);
+                        } catch (Exception e) {
+                            log.warn("Failed to add product {} to collection {}", productId, titleKey, e);
+                        }
+                    }
+                }
+            }
+
+            if (draft.mode == DraftMode.ONLINE_WITH_PHOTO) {
+                pub = publishToListingChat(telegramCaption, images);
+                String telegramLink = buildTelegramLink(pub.channelId, pub.primaryMessageId);
+                if (telegramLink != null && !telegramLink.isBlank()) {
+                    try {
+                        shopify.setProductMetafield(productId,
+                                config.telegramLinkMetafieldNamespace,
+                                config.telegramLinkMetafieldKey,
+                                telegramLink,
+                                config.telegramLinkMetafieldType);
+                    } catch (Exception e) {
+                        log.warn("Failed to set telegram link metafield for product {}", productId, e);
+                    }
+                }
+                for (Message sent : pub.messages) {
+                    String msgText = sent.getCaption() == null ? "" : sent.getCaption();
+                    long sentDate = sent.getDate() == null ? Instant.now().getEpochSecond() : sent.getDate();
+                    db.upsertPost(pub.channelId, sent.getMessageId(), pub.mediaGroupId, msgText, sentDate);
+                    db.setProductIdForMessage(pub.channelId, sent.getMessageId(), productId);
+                }
+                if (pub.mediaGroupId != null && !pub.mediaGroupId.isBlank()) {
+                    db.upsertMediaGroup(pub.mediaGroupId, pub.channelId);
+                    db.markMediaGroupProcessed(pub.mediaGroupId);
+                }
+            }
+
+            db.upsertProductCard(new ProductCard(
+                    productId,
+                    pub == null ? "POS_ONLY" : pub.channelId,
+                    pub == null ? 0 : pub.primaryMessageId,
+                    pub == null ? null : pub.mediaGroupId,
+                    title,
+                    size,
+                    (draft.rawDescription == null || draft.rawDescription.isBlank()) ? captionCore : draft.rawDescription,
+                    article,
+                    price,
+                    price,
+                    0,
+                    null,
+                    status,
+                    Instant.now().getEpochSecond(),
+                    Instant.now().getEpochSecond()
+            ));
+
+            return new PublishedDraft(productId, title, price, article, status);
+        } catch (Exception e) {
+            if (productId > 0) {
+                try {
+                    shopify.deleteProduct(productId);
+                } catch (Exception ignored) {
+                }
+            }
+            if (pub != null) {
+                deleteTelegramByReference(pub.channelId, pub.primaryMessageId, pub.mediaGroupId);
+            }
+            throw e;
+        }
+    }
+
+    private void queueDraftByDatetime(long chatId, AdminSession session, String rawInput) {
+        if (session.draft == null) {
+            sendWelcomeMenu(chatId, "⚠️ Черновик не найден. Начните заново.");
+            return;
+        }
+        String input = rawInput == null ? "" : rawInput.trim();
+        LocalDateTime publishLocal;
+        try {
+            String compact = input.replaceAll("\\s+", " ");
+            java.util.regex.Matcher m = Pattern.compile("^(\\d{2})\\.(\\d{2}),\\s*(\\d{2}):(\\d{2})$").matcher(compact);
+            if (!m.matches()) {
+                throw new DateTimeParseException("Bad format", input, 0);
+            }
+            int day = Integer.parseInt(m.group(1));
+            int month = Integer.parseInt(m.group(2));
+            int hour = Integer.parseInt(m.group(3));
+            int minute = Integer.parseInt(m.group(4));
+            ZoneId belgrade = ZoneId.of("Europe/Belgrade");
+            int year = LocalDate.now(belgrade).getYear();
+            publishLocal = LocalDateTime.of(year, month, day, hour, minute);
+            LocalDateTime nowBelgrade = LocalDateTime.now(belgrade);
+            if (!publishLocal.isAfter(nowBelgrade)) {
+                sendText(chatId, "Указанное время уже прошло. Введите будущую дату/время по Белграду.");
+                return;
+            }
+        } catch (Exception e) {
+            sendText(chatId,
+                    "Неверный формат. Используйте: 22.05, 20:00",
+                    inlineSingleColumn(button("Отменить", CB_CANCEL_FLOW)));
+            return;
+        }
+
+        DraftData draft = session.draft.copy();
+        if (!isArticleEnabled()) {
+            draft.article = generateInternalArticle();
+        } else {
+            String article = draft.article == null ? "" : draft.article.replaceAll("\\D", "");
+            if (!article.matches("\\d{8}")) {
+                sendText(chatId, "❗ Для отложенной публикации укажите корректный артикул (8 цифр).");
+                return;
+            }
+            draft.article = article;
+        }
+        try {
+            ScheduledPayload payload = ScheduledPayload.fromDraft(draft);
+            long publishAtEpoch = publishLocal.atZone(ZoneId.of("Europe/Belgrade")).toEpochSecond();
+            long taskId = db.enqueueScheduledPost(draft.mode.name(), mapper.writeValueAsString(payload), publishAtEpoch, chatId);
+            resetSession(session);
+            sendWelcomeMenu(chatId,
+                    "✅ Пост поставлен в очередь.\nID: " + taskId +
+                            "\nПубликация: " + publishLocal.format(BELGRADE_DT_SHOW) + " (Belgrade)");
+        } catch (Exception e) {
+            log.warn("Failed to enqueue scheduled draft", e);
+            sendText(chatId, "❌ Не удалось поставить в очередь: " + e.getMessage());
+        }
+    }
+
+    private void sendScheduledPostsPage(long chatId, int page) {
+        int pageSize = Math.max(1, config.listPageSize);
+        int total = db.countPendingScheduledPosts();
+        int pages = Math.max(1, (int) Math.ceil(total / (double) pageSize));
+        int safePage = Math.max(0, Math.min(page, pages - 1));
+        List<Database.ScheduledPost> items = db.listPendingScheduledPosts(pageSize, safePage * pageSize);
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("📅 Отложенные посты: ").append(total).append("\n");
+        sb.append("Страница ").append(safePage + 1).append("/").append(pages).append("\n");
+        if (items.isEmpty()) {
+            sb.append("\nОчередь пуста.");
+        } else {
+            ZoneId belgrade = ZoneId.of("Europe/Belgrade");
+            for (int i = 0; i < items.size(); i++) {
+                Database.ScheduledPost sp = items.get(i);
+                String modeLabel = "POS_ONLY".equalsIgnoreCase(sp.mode) ? "Без фото / POS" : "Онлайн";
+                String title = "Товар";
+                String price = "-";
+                try {
+                    ScheduledPayload payload = mapper.readValue(sp.payloadJson, ScheduledPayload.class);
+                    if (payload.title != null && !payload.title.isBlank()) title = payload.title;
+                    if (payload.priceRsd > 0) price = formatRsd(payload.priceRsd) + " RSD";
+                } catch (Exception ignored) {
+                }
+                String dt = Instant.ofEpochSecond(sp.publishAt).atZone(belgrade).format(BELGRADE_DT_SHOW);
+                sb.append("\n")
+                        .append(sp.id)
+                        .append(". ")
+                        .append(dt)
+                        .append(" | ")
+                        .append(modeLabel)
+                        .append(" | ")
+                        .append(title)
+                        .append(" | ")
+                        .append(price);
+            }
+        }
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+        appendPaginationRows(rows, "SCHEDULED", safePage, pages);
+        rows.add(List.of(button("⬅ Назад в меню", CB_MENU)));
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        markup.setKeyboard(rows);
+        sendText(chatId, sb.toString(), markup);
+    }
+
+    private void processScheduledPostsSafe() {
+        try {
+            processScheduledPosts();
+        } catch (Exception e) {
+            log.warn("Scheduled posts sync failed", e);
+        }
+    }
+
+    private void processScheduledPosts() {
+        while (true) {
+            List<Database.ScheduledPost> due = db.listDueScheduledPosts(Instant.now().getEpochSecond(), 20);
+            if (due.isEmpty()) {
+                return;
+            }
+            for (Database.ScheduledPost post : due) {
+                try {
+                    publishScheduledPostWithRetry(post);
+                    db.markScheduledPostDone(post.id);
+                } catch (Exception e) {
+                    String err = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+                    db.markScheduledPostRetry(post.id, err);
+                    log.warn("Failed to publish scheduled post id={}: {}", post.id, err);
+                    try {
+                        sendText(post.createdBy, "⚠️ Не удалось опубликовать отложенный пост #" + post.id + ": " + err);
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+        }
+    }
+
+    private void publishScheduledPostWithRetry(Database.ScheduledPost post) throws Exception {
+        int attempts = 6;
+        for (int attempt = 1; attempt <= attempts; attempt++) {
+            try {
+                ScheduledPayload payload = mapper.readValue(post.payloadJson, ScheduledPayload.class);
+                DraftData draft = payload.toDraft();
+                if (!isArticleEnabled()) {
+                    draft.article = generateInternalArticle();
+                }
+                publishDraftInternal(draft);
+                return;
+            } catch (RateLimitException e) {
+                long waitSec = Math.max(2, e.getRetryAfterSeconds() > 0 ? e.getRetryAfterSeconds() : 2);
+                sleepQuietly(waitSec * 1000L);
+            } catch (TelegramApiException e) {
+                if (!contains429(e.getMessage()) || attempt == attempts) {
+                    throw e;
+                }
+                sleepQuietly(2000L * attempt);
+            } catch (IOException e) {
+                if (!contains429(e.getMessage()) || attempt == attempts) {
+                    throw e;
+                }
+                sleepQuietly(2000L * attempt);
+            }
+        }
+        throw new IOException("Retries exhausted");
+    }
+
+    private boolean contains429(String message) {
+        if (message == null) return false;
+        String lower = message.toLowerCase(Locale.ROOT);
+        return lower.contains("429") || lower.contains("too many requests") || lower.contains("rate limit");
+    }
+
+    private void sleepQuietly(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private void handleArticulCommand(long chatId, String text) {
+        String[] parts = text.trim().split("\\s+");
+        if (parts.length == 1 || "status".equalsIgnoreCase(parts[1])) {
+            sendText(chatId, "Артикулы: " + (isArticleEnabled() ? "включены ✅" : "отключены ⏸"));
+            return;
+        }
+        String cmd = parts[1].toLowerCase(Locale.ROOT);
+        if ("on".equals(cmd) || "enable".equals(cmd) || "1".equals(cmd)) {
+            db.setMeta(META_ARTICLE_ENABLED, "true");
+            sendText(chatId, "✅ Артикулы включены. Бот снова будет использовать артикулы и штрихкоды.");
+            return;
+        }
+        if ("off".equals(cmd) || "disable".equals(cmd) || "0".equals(cmd)) {
+            db.setMeta(META_ARTICLE_ENABLED, "false");
+            sendText(chatId, "⏸ Артикулы отключены. Новые товары будут публиковаться без артикула в тексте.");
+            return;
+        }
+        sendText(chatId, "Команда: /articul on | /articul off | /articul status");
+    }
+
+    private boolean isArticleEnabled() {
+        String raw = db.getMeta(META_ARTICLE_ENABLED);
+        return raw != null && "true".equalsIgnoreCase(raw.trim());
+    }
+
+    private String generateInternalArticle() {
+        for (int i = 0; i < 200; i++) {
+            String candidate = String.format(Locale.US, "%08d", ThreadLocalRandom.current().nextInt(10000000, 99999999));
+            if (!db.existsActiveArticle(candidate)) {
+                return candidate;
+            }
+        }
+        String fallback = String.format(Locale.US, "%08d", (int) (Instant.now().getEpochSecond() % 100000000L));
+        if (!db.existsActiveArticle(fallback)) {
+            return fallback;
+        }
+        return String.format(Locale.US, "%08d", ThreadLocalRandom.current().nextInt(10000000, 99999999));
+    }
+
+    private static class PublishedDraft {
+        final long productId;
+        final String title;
+        final double priceRsd;
+        final String article;
+        final String status;
+
+        PublishedDraft(long productId, String title, double priceRsd, String article, String status) {
+            this.productId = productId;
+            this.title = title;
+            this.priceRsd = priceRsd;
+            this.article = article;
+            this.status = status;
+        }
+    }
+
+    private static class ScheduledPayload {
+        public String mode;
+        public List<String> photoFileIds = new ArrayList<>();
+        public String title;
+        public String size;
+        public double priceRsd;
+        public String article;
+        public String status;
+        public String rawDescription;
+
+        static ScheduledPayload fromDraft(DraftData draft) {
+            ScheduledPayload payload = new ScheduledPayload();
+            payload.mode = draft.mode == null ? DraftMode.ONLINE_WITH_PHOTO.name() : draft.mode.name();
+            payload.photoFileIds = draft.photoFileIds == null ? new ArrayList<>() : new ArrayList<>(draft.photoFileIds);
+            payload.title = draft.title;
+            payload.size = draft.size;
+            payload.priceRsd = draft.priceRsd;
+            payload.article = draft.article;
+            payload.status = draft.status;
+            payload.rawDescription = draft.rawDescription;
+            return payload;
+        }
+
+        DraftData toDraft() {
+            DraftData draft = new DraftData();
+            draft.mode = mode == null ? DraftMode.ONLINE_WITH_PHOTO : DraftMode.valueOf(mode);
+            draft.photoFileIds = photoFileIds == null ? new ArrayList<>() : new ArrayList<>(photoFileIds);
+            draft.title = title == null ? "" : title;
+            draft.size = size == null ? "" : size;
+            draft.priceRsd = priceRsd;
+            draft.article = article == null ? "" : article;
+            draft.status = status == null ? "ACTIVE" : status;
+            draft.rawDescription = rawDescription == null ? "" : rawDescription;
+            return draft;
+        }
+    }
+
     private void sendText(long chatId, String text) {
         sendText(chatId, text, null);
     }
@@ -1551,6 +2677,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private InlineKeyboardMarkup buildMainInlineKeyboard() {
         return inlineSingleColumn(
                 button("➕ Добавить товар", CB_ADD_PRODUCT),
+                button("🧾 Без фото (POS)", CB_WITHOUT_PHOTO),
+                button("📅 Отложенные посты", CB_SCHEDULED_POSTS),
                 button("✏️ Редактировать пост", CB_EDIT_POST),
                 button("📦 Список товаров", CB_PRODUCTS),
                 button("🟡 Зарезервировать", CB_RESERVE),
@@ -1589,7 +2717,9 @@ public class ShopifyBot extends TelegramLongPollingBot {
     }
 
     private AdminSession sessionFor(long userId) {
-        return sessions.computeIfAbsent(userId, k -> new AdminSession());
+        AdminSession session = sessions.computeIfAbsent(userId, k -> new AdminSession());
+        session.userId = userId;
+        return session;
     }
 
     private void resetSession(AdminSession session) {
@@ -1597,6 +2727,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         session.pendingPhotoFileIds.clear();
         session.selectedProductId = 0;
         session.searchScope = null;
+        session.draft = null;
     }
 
     private void syncDiscountsSafe() {
@@ -1789,9 +2920,18 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private enum AdminState {
         IDLE,
         ADD_PRODUCT_PHOTOS,
+        AI_DRAFT_PHOTOS,
+        WITHOUT_PHOTO_PHOTOS,
         ADD_PRODUCT_DESCRIPTION,
         ADD_ADMIN_ID,
         ARTICLE_SEARCH_INPUT,
+        DRAFT_EDIT_CHOICE,
+        DRAFT_EDIT_BRAND_INPUT,
+        DRAFT_EDIT_SIZE_INPUT,
+        DRAFT_EDIT_PRICE_INPUT,
+        DRAFT_EDIT_ARTICLE_INPUT,
+        DRAFT_PUBLISH_CHOICE,
+        DRAFT_SCHEDULE_INPUT,
         RESERVE_SELECT,
         UNRESERVE_SELECT,
         SOLD_SELECT,
@@ -1810,11 +2950,42 @@ public class ShopifyBot extends TelegramLongPollingBot {
         EDIT
     }
 
+    private enum DraftMode {
+        ONLINE_WITH_PHOTO,
+        POS_ONLY
+    }
+
     private static class AdminSession {
         AdminState state = AdminState.IDLE;
         final List<String> pendingPhotoFileIds = new ArrayList<>();
         long selectedProductId = 0;
         ProductSearchScope searchScope;
+        DraftData draft;
+        long userId;
+    }
+
+    private static class DraftData {
+        DraftMode mode;
+        List<String> photoFileIds = new ArrayList<>();
+        String title = "";
+        String size = "";
+        double priceRsd = 0;
+        String article = "";
+        String status = "ACTIVE";
+        String rawDescription = "";
+
+        DraftData copy() {
+            DraftData d = new DraftData();
+            d.mode = this.mode;
+            d.photoFileIds = this.photoFileIds == null ? new ArrayList<>() : new ArrayList<>(this.photoFileIds);
+            d.title = this.title;
+            d.size = this.size;
+            d.priceRsd = this.priceRsd;
+            d.article = this.article;
+            d.status = this.status;
+            d.rawDescription = this.rawDescription;
+            return d;
+        }
     }
 
     private void handleMessage(Message message, boolean isEdit) {
@@ -2022,7 +3193,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         payload.priceEur = priceSelection.price;
         payload.size = size;
         String article = TextParser.extractArticle(text);
-        if (article != null && !article.isBlank()) {
+        if (isArticleEnabled() && article != null && !article.isBlank()) {
             payload.barcode = article;
             payload.sku = article;
         }
@@ -2494,45 +3665,43 @@ public class ShopifyBot extends TelegramLongPollingBot {
     }
 
     private void syncDeletedProducts() {
-        List<PostRef> posts = db.listProcessedPosts();
-        if (posts.isEmpty()) return;
-
-        java.util.Map<Long, PostRef> byProduct = new java.util.HashMap<>();
-        for (PostRef ref : posts) {
-            byProduct.putIfAbsent(ref.productId, ref);
-        }
-
-        for (PostRef ref : byProduct.values()) {
+        List<ProductCard> cards = db.listCardsForSync();
+        if (cards.isEmpty()) return;
+        for (ProductCard card : cards) {
             try {
-                ShopifyClient.ProductAvailability availability = shopify.getProductAvailability(ref.productId);
+                ShopifyClient.ProductAvailability availability = shopify.getProductAvailability(card.productId);
                 if (availability == ShopifyClient.ProductAvailability.MISSING) {
-                    deleteTelegramByReference(ref.channelId, ref.messageId, ref.mediaGroupId);
-                    db.markProductStatus(ref.productId, "MISSING");
-                    db.deleteProductCard(ref.productId);
-                    log.info("Product missing in Shopify, deleted Telegram message(s). productId={}", ref.productId);
+                    if (!"POS_ONLY".equals(card.status) && card.messageId > 0) {
+                        deleteTelegramByReference(card.channelId, card.messageId, card.mediaGroupId);
+                    }
+                    db.markProductStatus(card.productId, "MISSING");
+                    db.deleteProductCard(card.productId);
+                    log.info("Product missing in Shopify, cleaned references. productId={}", card.productId);
                 } else if (availability == ShopifyClient.ProductAvailability.OUT_OF_STOCK) {
                     try {
-                        shopify.deleteProduct(ref.productId);
-                        log.info("Product {} deleted in Shopify after reaching 0 stock", ref.productId);
+                        shopify.deleteProduct(card.productId);
+                        log.info("Product {} deleted in Shopify after reaching 0 stock", card.productId);
                     } catch (Exception e) {
-                        log.warn("Failed to delete out-of-stock product {} in Shopify", ref.productId, e);
+                        log.warn("Failed to delete out-of-stock product {} in Shopify", card.productId, e);
                     }
-                    deleteTelegramByReference(ref.channelId, ref.messageId, ref.mediaGroupId);
-                    db.markProductStatus(ref.productId, "OUT_OF_STOCK");
-                    db.deleteProductCard(ref.productId);
-                    log.info("Product out of stock in Shopify, deleted Telegram message(s). productId={}", ref.productId);
+                    if (!"POS_ONLY".equals(card.status) && card.messageId > 0) {
+                        deleteTelegramByReference(card.channelId, card.messageId, card.mediaGroupId);
+                    }
+                    db.markProductStatus(card.productId, "OUT_OF_STOCK");
+                    db.deleteProductCard(card.productId);
+                    log.info("Product out of stock in Shopify, cleaned references. productId={}", card.productId);
                 }
                 if (config.productSyncDelayMs > 0) {
                     Thread.sleep(config.productSyncDelayMs);
                 }
             } catch (RateLimitException e) {
-                log.warn("Rate limited by Shopify during sync (productId={}), pausing until next cycle", ref.productId);
+                log.warn("Rate limited by Shopify during sync (productId={}), pausing until next cycle", card.productId);
                 return;
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
                 return;
             } catch (Exception e) {
-                log.warn("Failed to sync product {} existence", ref.productId, e);
+                log.warn("Failed to sync product {} existence", card.productId, e);
             }
         }
     }
@@ -2560,7 +3729,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
                     return;
                 }
                 syncCardState(card, "RESERVED", card.discountPercent, card.fixedPriceRsd, card.currentPriceRsd);
-                sendText(chatId, "✅ Резерв поставлен: " + card.title + " (Artikal: " + card.article + ")");
+                sendText(chatId, "✅ Резерв поставлен: " + card.title +
+                        (isArticleEnabled() && card.article != null && !card.article.isBlank() ? " (Artikal: " + card.article + ")" : ""));
                 sendSelectableProductsPage(chatId, session, 0);
                 return;
             }
@@ -2573,13 +3743,16 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 }
                 ProductCard refreshed = db.findProductCardById(card.productId);
                 String finalPrice = refreshed == null ? formatRsd(card.currentPriceRsd) : formatRsd(refreshed.currentPriceRsd);
-                sendText(chatId, "✅ Резерв снят: " + card.title + " (Artikal: " + card.article + ")\nАктуальная цена: " + finalPrice + " RSD");
+                sendText(chatId, "✅ Резерв снят: " + card.title +
+                        (isArticleEnabled() && card.article != null && !card.article.isBlank() ? " (Artikal: " + card.article + ")" : "") +
+                        "\nАктуальная цена: " + finalPrice + " RSD");
                 sendSelectableProductsPage(chatId, session, 0);
                 return;
             }
             if (session.state == AdminState.SOLD_SELECT) {
                 markCardAsSold(card);
-                sendText(chatId, "✅ Товар помечен проданным: " + card.title + " (Artikal: " + card.article + ")");
+                sendText(chatId, "✅ Товар помечен проданным: " + card.title +
+                        (isArticleEnabled() && card.article != null && !card.article.isBlank() ? " (Artikal: " + card.article + ")" : ""));
                 sendSelectableProductsPage(chatId, session, 0);
                 return;
             }

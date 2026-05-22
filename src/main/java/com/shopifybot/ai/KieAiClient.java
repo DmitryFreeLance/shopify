@@ -38,14 +38,18 @@ public class KieAiClient {
 
     public Classification classify(String text, List<byte[]> images, String explicitSectionHint, String modelOverride, String endpointOverrideOverride) throws IOException {
         String prompt = PromptBuilder.build(text, explicitSectionHint);
+        String payload = completeRaw(prompt, images, modelOverride, endpointOverrideOverride);
+        return parseClassificationFromContent(payload);
+    }
 
+    public String completeRaw(String prompt, List<byte[]> images, String modelOverride, String endpointOverrideOverride) throws IOException {
         ObjectNode root = mapper.createObjectNode();
         root.put("model", modelOverride);
 
         ArrayNode messages = root.putArray("messages");
         ObjectNode system = messages.addObject();
         system.put("role", "system");
-        system.put("content", "You are a strict classifier for a clothing resale catalog. Return only valid JSON.");
+        system.put("content", "Return only valid JSON.");
 
         ObjectNode user = messages.addObject();
         user.put("role", "user");
@@ -73,8 +77,12 @@ public class KieAiClient {
             if (!response.isSuccessful()) {
                 throw new IOException("Kie AI error: " + response.code() + " " + response.message());
             }
-            String payload = response.body() == null ? "" : response.body().string();
-            return parseClassification(payload);
+            JsonNode rootResp = mapper.readTree(response.body() == null ? "" : response.body().string());
+            JsonNode contentNode = rootResp.at("/choices/0/message/content");
+            if (contentNode.isMissingNode() || contentNode.isNull()) {
+                throw new IOException("Kie AI response missing content");
+            }
+            return contentNode.asText("");
         }
     }
 
@@ -86,13 +94,7 @@ public class KieAiClient {
         return cleanBase + "/" + modelOverride + "/v1/chat/completions";
     }
 
-    private Classification parseClassification(String responseBody) throws IOException {
-        JsonNode root = mapper.readTree(responseBody);
-        JsonNode content = root.at("/choices/0/message/content");
-        if (content.isMissingNode() || content.isNull()) {
-            throw new IOException("Kie AI response missing content");
-        }
-        String text = content.asText();
+    private Classification parseClassificationFromContent(String text) throws IOException {
         String json = extractJson(text);
         JsonNode node = mapper.readTree(json);
 

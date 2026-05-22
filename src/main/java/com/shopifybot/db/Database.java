@@ -82,6 +82,19 @@ public class Database {
                     "created_at INTEGER NOT NULL," +
                     "updated_at INTEGER NOT NULL" +
                     ")");
+            stmt.executeUpdate("CREATE TABLE IF NOT EXISTS scheduled_posts (" +
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT," +
+                    "mode TEXT NOT NULL," +
+                    "payload_json TEXT NOT NULL," +
+                    "publish_at INTEGER NOT NULL," +
+                    "created_by INTEGER NOT NULL," +
+                    "status TEXT NOT NULL DEFAULT 'PENDING'," +
+                    "retry_count INTEGER NOT NULL DEFAULT 0," +
+                    "last_error TEXT," +
+                    "created_at INTEGER NOT NULL," +
+                    "updated_at INTEGER NOT NULL" +
+                    ")");
+            stmt.executeUpdate("CREATE INDEX IF NOT EXISTS idx_scheduled_posts_status_time ON scheduled_posts(status, publish_at)");
             stmt.executeUpdate("CREATE INDEX IF NOT EXISTS idx_product_cards_status ON product_cards(status)");
             stmt.executeUpdate("CREATE INDEX IF NOT EXISTS idx_product_cards_updated_at ON product_cards(updated_at)");
             try {
@@ -635,6 +648,10 @@ public class Database {
         return listProductsByStatuses(5000, 0, "status='ACTIVE'");
     }
 
+    public List<ProductCard> listCardsForSync() {
+        return listProductsByStatuses(10000, 0, "status IN ('ACTIVE','RESERVED','POS_ONLY')");
+    }
+
     private List<ProductCard> listProductsByStatuses(int limit, int offset, String whereClause) {
         List<ProductCard> items = new ArrayList<>();
         String sql = "SELECT product_id, channel_id, message_id, media_group_id, title, size, description, article, " +
@@ -849,6 +866,102 @@ public class Database {
         }
     }
 
+    public long enqueueScheduledPost(String mode, String payloadJson, long publishAtEpoch, long createdBy) {
+        long now = Instant.now().getEpochSecond();
+        String sql = "INSERT INTO scheduled_posts(mode, payload_json, publish_at, created_by, status, retry_count, last_error, created_at, updated_at) " +
+                "VALUES(?,?,?,?, 'PENDING', 0, NULL, ?, ?)";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+            ps.setString(1, mode);
+            ps.setString(2, payloadJson);
+            ps.setLong(3, publishAtEpoch);
+            ps.setLong(4, createdBy);
+            ps.setLong(5, now);
+            ps.setLong(6, now);
+            ps.executeUpdate();
+            try (ResultSet rs = ps.getGeneratedKeys()) {
+                if (rs.next()) {
+                    return rs.getLong(1);
+                }
+            }
+            throw new RuntimeException("DB enqueueScheduledPost failed: no generated id");
+        } catch (SQLException e) {
+            throw new RuntimeException("DB enqueueScheduledPost failed", e);
+        }
+    }
+
+    public List<ScheduledPost> listDueScheduledPosts(long nowEpoch, int limit) {
+        List<ScheduledPost> items = new ArrayList<>();
+        String sql = "SELECT id, mode, payload_json, publish_at, created_by, status, retry_count, last_error, created_at, updated_at " +
+                "FROM scheduled_posts WHERE status='PENDING' AND publish_at<=? ORDER BY publish_at ASC, id ASC LIMIT ?";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, nowEpoch);
+            ps.setInt(2, limit);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    items.add(mapScheduledPost(rs));
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("DB listDueScheduledPosts failed", e);
+        }
+        return items;
+    }
+
+    public List<ScheduledPost> listPendingScheduledPosts(int limit, int offset) {
+        List<ScheduledPost> items = new ArrayList<>();
+        String sql = "SELECT id, mode, payload_json, publish_at, created_by, status, retry_count, last_error, created_at, updated_at " +
+                "FROM scheduled_posts WHERE status='PENDING' ORDER BY publish_at ASC, id ASC LIMIT ? OFFSET ?";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, limit);
+            ps.setInt(2, offset);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    items.add(mapScheduledPost(rs));
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("DB listPendingScheduledPosts failed", e);
+        }
+        return items;
+    }
+
+    public int countPendingScheduledPosts() {
+        String sql = "SELECT COUNT(*) FROM scheduled_posts WHERE status='PENDING'";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return rs.getInt(1);
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("DB countPendingScheduledPosts failed", e);
+        }
+        return 0;
+    }
+
+    public void markScheduledPostDone(long id) {
+        String sql = "UPDATE scheduled_posts SET status='DONE', updated_at=? WHERE id=?";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, Instant.now().getEpochSecond());
+            ps.setLong(2, id);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("DB markScheduledPostDone failed", e);
+        }
+    }
+
+    public void markScheduledPostRetry(long id, String error) {
+        String sql = "UPDATE scheduled_posts SET retry_count=retry_count+1, last_error=?, updated_at=? WHERE id=?";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, error);
+            ps.setLong(2, Instant.now().getEpochSecond());
+            ps.setLong(3, id);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("DB markScheduledPostRetry failed", e);
+        }
+    }
+
     public void updateProductCardPricing(long productId, double currentPriceRsd, int discountPercent, Double fixedPriceRsd) {
         String sql = "UPDATE product_cards SET current_price_rsd=?, discount_percent=?, fixed_price_rsd=?, updated_at=? WHERE product_id=?";
         try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -900,6 +1013,21 @@ public class Database {
                 rs.getString(13),
                 rs.getLong(14),
                 rs.getLong(15)
+        );
+    }
+
+    private ScheduledPost mapScheduledPost(ResultSet rs) throws SQLException {
+        return new ScheduledPost(
+                rs.getLong(1),
+                rs.getString(2),
+                rs.getString(3),
+                rs.getLong(4),
+                rs.getLong(5),
+                rs.getString(6),
+                rs.getInt(7),
+                rs.getString(8),
+                rs.getLong(9),
+                rs.getLong(10)
         );
     }
 
@@ -998,6 +1126,33 @@ public class Database {
             this.discountPercent = discountPercent;
             this.fixedPriceRsd = fixedPriceRsd;
             this.status = status;
+            this.createdAt = createdAt;
+            this.updatedAt = updatedAt;
+        }
+    }
+
+    public static class ScheduledPost {
+        public final long id;
+        public final String mode;
+        public final String payloadJson;
+        public final long publishAt;
+        public final long createdBy;
+        public final String status;
+        public final int retryCount;
+        public final String lastError;
+        public final long createdAt;
+        public final long updatedAt;
+
+        public ScheduledPost(long id, String mode, String payloadJson, long publishAt, long createdBy,
+                             String status, int retryCount, String lastError, long createdAt, long updatedAt) {
+            this.id = id;
+            this.mode = mode;
+            this.payloadJson = payloadJson;
+            this.publishAt = publishAt;
+            this.createdBy = createdBy;
+            this.status = status;
+            this.retryCount = retryCount;
+            this.lastError = lastError;
             this.createdAt = createdAt;
             this.updatedAt = updatedAt;
         }

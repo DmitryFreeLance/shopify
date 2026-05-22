@@ -656,8 +656,12 @@ public class ShopifyBot extends TelegramLongPollingBot {
                     return;
                 }
                 if (aiBatchMode) {
-                    addPhotoToAiBatch(session, message);
-                    sendAiPhotoPrompt(chatId, session, withoutPhoto);
+                    int groupSize = addPhotoToAiBatch(session, message);
+                    String mgid = message.getMediaGroupId();
+                    // For albums, reply only once per media group (on first item) to avoid spam.
+                    if (mgid == null || mgid.isBlank() || groupSize <= 1) {
+                        sendAiPhotoPrompt(chatId, session, withoutPhoto);
+                    }
                 } else {
                     PhotoSize best = selectBestPhoto(message.getPhoto());
                     session.pendingPhotoFileIds.add(best.getFileId());
@@ -1938,9 +1942,9 @@ public class ShopifyBot extends TelegramLongPollingBot {
         ));
     }
 
-    private void addPhotoToAiBatch(AdminSession session, Message message) {
+    private int addPhotoToAiBatch(AdminSession session, Message message) {
         if (message == null || message.getPhoto() == null || message.getPhoto().isEmpty()) {
-            return;
+            return 0;
         }
         String groupKey = message.getMediaGroupId();
         if (groupKey == null || groupKey.isBlank()) {
@@ -1948,10 +1952,11 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
         List<String> group = session.aiPhotoGroups.computeIfAbsent(groupKey, k -> new ArrayList<>());
         if (group.size() >= 9) {
-            return;
+            return group.size();
         }
         PhotoSize best = selectBestPhoto(message.getPhoto());
         group.add(best.getFileId());
+        return group.size();
     }
 
     private void buildDraftFromAi(long chatId, AdminSession session, boolean withoutPhotoMode) {

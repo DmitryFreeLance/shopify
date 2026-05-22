@@ -463,6 +463,10 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 return;
             }
             if (session.state == AdminState.AI_DRAFT_PHOTOS || session.state == AdminState.WITHOUT_PHOTO_PHOTOS) {
+                if (session.aiProcessing) {
+                    answerCallback(callback, "Уже обрабатываю фото, подождите");
+                    return;
+                }
                 buildDraftFromAi(chatId, session, session.state == AdminState.WITHOUT_PHOTO_PHOTOS);
                 answerCallback(callback, "");
                 return;
@@ -1925,10 +1929,15 @@ public class ShopifyBot extends TelegramLongPollingBot {
     }
 
     private void buildDraftFromAi(long chatId, AdminSession session, boolean withoutPhotoMode) {
+        if (session.aiProcessing) {
+            sendText(chatId, "⏳ Уже обрабатываю фото, пожалуйста подождите.");
+            return;
+        }
         if (session.pendingPhotoFileIds.isEmpty()) {
             sendAiPhotoPrompt(chatId, 0, withoutPhotoMode);
             return;
         }
+        session.aiProcessing = true;
         List<String> fileIds = new ArrayList<>(session.pendingPhotoFileIds);
         sendText(chatId, "⏳ Анализирую фото через ИИ...");
         workers.submit(() -> {
@@ -1984,6 +1993,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
                                 button("⬅ Назад в меню", CB_MENU),
                                 button("Отменить", CB_CANCEL_FLOW)
                         ));
+            } finally {
+                session.aiProcessing = false;
             }
         });
     }
@@ -2012,19 +2023,12 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
 
         IOException lastIo = null;
-        String[] models = new String[]{
-                config.kieModel,
-                config.kieFallbackModel
-        };
-        String[] endpoints = new String[]{
-                config.kieEndpointOverride,
-                config.kieFallbackEndpointOverride
-        };
-        int attempts = Math.max(2, config.kieRetryAttempts);
+        List<AiProvider> providers = buildAiProviders();
+        int attempts = providers.size();
         for (int i = 0; i < attempts; i++) {
-            int idx = i % models.length;
-            String model = models[idx];
-            String endpoint = endpoints[idx];
+            AiProvider provider = providers.get(i);
+            String model = provider.model;
+            String endpoint = provider.endpoint;
             try {
                 String raw = kie.completeRaw(prompt, images, model, endpoint);
                 JsonNode node = parseAiJson(raw);
@@ -2055,6 +2059,30 @@ public class ShopifyBot extends TelegramLongPollingBot {
             throw lastIo;
         }
         throw new IOException("No AI response");
+    }
+
+    private List<AiProvider> buildAiProviders() {
+        List<AiProvider> providers = new ArrayList<>();
+        addAiProvider(providers, config.kieModel, config.kieEndpointOverride);
+        addAiProvider(providers, config.kieFallbackModel, config.kieFallbackEndpointOverride);
+        addAiProvider(providers, config.kieSecondFallbackModel, config.kieSecondFallbackEndpointOverride);
+        if (providers.isEmpty()) {
+            providers.add(new AiProvider("gemini-3-flash", ""));
+        }
+        return providers;
+    }
+
+    private void addAiProvider(List<AiProvider> providers, String model, String endpoint) {
+        if (model == null || model.isBlank()) {
+            return;
+        }
+        String cleanModel = model.trim();
+        for (AiProvider p : providers) {
+            if (p.model.equalsIgnoreCase(cleanModel)) {
+                return;
+            }
+        }
+        providers.add(new AiProvider(cleanModel, endpoint == null ? "" : endpoint.trim()));
     }
 
     private JsonNode parseAiJson(String raw) throws IOException {
@@ -2619,6 +2647,16 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
     }
 
+    private static class AiProvider {
+        final String model;
+        final String endpoint;
+
+        AiProvider(String model, String endpoint) {
+            this.model = model;
+            this.endpoint = endpoint == null ? "" : endpoint;
+        }
+    }
+
     private static class ScheduledPayload {
         public String mode;
         public List<String> photoFileIds = new ArrayList<>();
@@ -2728,6 +2766,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         session.selectedProductId = 0;
         session.searchScope = null;
         session.draft = null;
+        session.aiProcessing = false;
     }
 
     private void syncDiscountsSafe() {
@@ -2962,6 +3001,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         ProductSearchScope searchScope;
         DraftData draft;
         long userId;
+        volatile boolean aiProcessing;
     }
 
     private static class DraftData {
@@ -3573,18 +3613,17 @@ public class ShopifyBot extends TelegramLongPollingBot {
     }
 
     private Classification classifyWithFallback(String text, List<byte[]> images, String explicitHint) throws IOException {
-        int attempts = Math.max(1, config.kieRetryAttempts);
+        List<AiProvider> providers = buildAiProviders();
+        int attempts = Math.max(1, Math.min(config.kieRetryAttempts, providers.size()));
         long delayMs = Math.max(0, config.kieRetryDelayMs);
         Classification last = null;
         IOException lastIo = null;
 
         for (int attempt = 1; attempt <= attempts; attempt++) {
-            boolean usePrimary = (attempt % 2 == 1);
-            String modelName = usePrimary ? config.kieModel : config.kieFallbackModel;
+            AiProvider provider = providers.get(attempt - 1);
+            String modelName = provider.model;
             try {
-                Classification result = usePrimary
-                        ? kie.classify(text, images, explicitHint)
-                        : kie.classify(text, images, explicitHint, config.kieFallbackModel, config.kieFallbackEndpointOverride);
+                Classification result = kie.classify(text, images, explicitHint, provider.model, provider.endpoint);
                 last = result;
                 if (result != null && result.categories != null && !result.categories.isEmpty()) {
                     log.info("AI model {} success after {} attempt(s), categories={}", modelName, attempt, result.categories.size());

@@ -30,9 +30,11 @@ public class Config {
     public final String kieApiKey;
     public final String kieModel;
     public final String kieFallbackModel;
+    public final String kieSecondFallbackModel;
     public final String kieBaseUrl;
     public final String kieEndpointOverride;
     public final String kieFallbackEndpointOverride;
+    public final String kieSecondFallbackEndpointOverride;
     public final Duration kieTimeout;
     public final int kieRetryAttempts;
     public final long kieRetryDelayMs;
@@ -80,9 +82,11 @@ public class Config {
         this.kieApiKey = requireEnv("KIE_API_KEY");
         this.kieModel = getenv("KIE_MODEL", "gemini-3-flash");
         this.kieFallbackModel = getenv("KIE_FALLBACK_MODEL", "gemini-2.5-flash");
+        this.kieSecondFallbackModel = getenv("KIE_SECOND_FALLBACK_MODEL", "");
         this.kieBaseUrl = getenv("KIE_BASE_URL", "https://api.kie.ai");
         this.kieEndpointOverride = getenv("KIE_ENDPOINT", "");
         this.kieFallbackEndpointOverride = getenv("KIE_FALLBACK_ENDPOINT", "");
+        this.kieSecondFallbackEndpointOverride = getenv("KIE_SECOND_FALLBACK_ENDPOINT", "");
         this.kieTimeout = Duration.ofSeconds(parseLong(getenv("KIE_TIMEOUT_SECONDS", "90"), 90));
         this.kieRetryAttempts = (int) parseLong(getenv("KIE_RETRY_ATTEMPTS", "10"), 10);
         this.kieRetryDelayMs = parseLong(getenv("KIE_RETRY_DELAY_MS", "1000"), 1000);

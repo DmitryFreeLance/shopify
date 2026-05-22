@@ -427,7 +427,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
         if (CB_DRAFT_FIELD_SIZE.equals(data)) {
             session.state = AdminState.DRAFT_EDIT_SIZE_INPUT;
-            sendText(chatId, "Введите новый размер:", inlineSingleColumn(button("Отменить", CB_CANCEL_FLOW)));
+            sendText(chatId, "Введите новый размер (например: muški L или ženski S):", inlineSingleColumn(button("Отменить", CB_CANCEL_FLOW)));
             answerCallback(callback, "");
             return;
         }
@@ -879,7 +879,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                     ));
             return;
         }
-        String size = TextParser.extractSize(rawDescription);
+        String size = normalizeSizeWithGender(TextParser.extractSize(rawDescription), rawDescription);
 
         if (session.pendingPhotoFileIds.isEmpty()) {
             resetSession(session);
@@ -1115,7 +1115,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                     ));
             return null;
         }
-        String size = TextParser.extractSize(rawDescription);
+        String size = normalizeSizeWithGender(TextParser.extractSize(rawDescription), rawDescription);
 
         if (session.pendingPhotoFileIds.isEmpty()) {
             sendPhotoUploadPrompt(chatId, 0);
@@ -1217,7 +1217,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                     ));
             return;
         }
-        String size = TextParser.extractSize(rawDescription);
+        String size = normalizeSizeWithGender(TextParser.extractSize(rawDescription), rawDescription);
         String statusForCaption = "RESERVED".equals(current.status) ? "RESERVED" : "ACTIVE";
 
         final String finalTitle = title;
@@ -2034,7 +2034,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 JsonNode node = parseAiJson(raw);
                 DraftData draft = new DraftData();
                 draft.title = readAiString(node, "brand", withoutPhotoMode ? "Без фото" : "Товар");
-                draft.size = readAiString(node, "size", "");
+                draft.size = normalizeSizeWithGender(readAiString(node, "size", ""), draft.title);
                 draft.priceRsd = parseAiPrice(node.path("price_rsd").asText(""));
                 draft.article = readAiString(node, "article", "");
                 if (withoutPhotoMode) {
@@ -2116,13 +2116,14 @@ public class ShopifyBot extends TelegramLongPollingBot {
             return;
         }
         DraftData draft = session.draft;
+        String postCaption = buildDraftPostCaption(draft);
         if (includePhotos && draft.mode == DraftMode.ONLINE_WITH_PHOTO && draft.photoFileIds != null && !draft.photoFileIds.isEmpty()) {
             try {
                 if (draft.photoFileIds.size() == 1) {
                     SendPhoto sendPhoto = new SendPhoto();
                     sendPhoto.setChatId(chatId);
                     sendPhoto.setPhoto(new InputFile(draft.photoFileIds.get(0)));
-                    sendPhoto.setCaption("🖼 Фото для публикации");
+                    sendPhoto.setCaption(postCaption);
                     execute(sendPhoto);
                 } else {
                     SendMediaGroup mediaGroup = new SendMediaGroup();
@@ -2132,7 +2133,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                         InputMediaPhoto photo = new InputMediaPhoto();
                         photo.setMedia(draft.photoFileIds.get(i));
                         if (i == 0) {
-                            photo.setCaption("🖼 Фото для публикации");
+                            photo.setCaption(postCaption);
                         }
                         media.add(photo);
                     }
@@ -2145,8 +2146,14 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
 
         String preview = renderDraftPreviewText(draft);
+        String messageText;
+        if (includePhotos && draft.mode == DraftMode.ONLINE_WITH_PHOTO && draft.photoFileIds != null && !draft.photoFileIds.isEmpty()) {
+            messageText = "🧾 Это финальная карточка для публикации.\nЕсли нужно, внесите правки.";
+        } else {
+            messageText = preview;
+        }
         sendText(chatId,
-                preview,
+                messageText,
                 inlineSingleColumn(
                         button("✏️ Редактировать", CB_DRAFT_EDIT),
                         button("✅ Готово", CB_DRAFT_READY),
@@ -2155,8 +2162,16 @@ public class ShopifyBot extends TelegramLongPollingBot {
     }
 
     private String renderDraftPreviewText(DraftData draft) {
+        String post = buildDraftPostCaption(draft);
+        if (draft.mode == DraftMode.POS_ONLY) {
+            return "🧾 Проверьте карточку:\n\n" + post +
+                    "\n\nТовар будет опубликован только в Point of Sale (без Telegram и без витрины интернет-магазина).";
+        }
+        return "🧾 Проверьте карточку:\n\n" + post;
+    }
+
+    private String buildDraftPostCaption(DraftData draft) {
         StringBuilder sb = new StringBuilder();
-        sb.append("🧾 Проверьте карточку:\n\n");
         sb.append(draft.title == null || draft.title.isBlank() ? "Товар" : draft.title).append("\n");
         if (draft.size != null && !draft.size.isBlank()) {
             sb.append("Vel - ").append(draft.size).append("\n");
@@ -2171,12 +2186,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
             }
         }
         if (draft.mode == DraftMode.ONLINE_WITH_PHOTO) {
-            String core = sb.substring("🧾 Проверьте карточку:\n\n".length());
-            sb.setLength(0);
-            sb.append("🧾 Проверьте карточку:\n\n")
-                    .append(buildTelegramPostCaption(core));
-        } else {
-            sb.append("\n\nТовар будет опубликован только в Point of Sale (без Telegram и без витрины интернет-магазина).");
+            return buildTelegramPostCaption(sb.toString());
         }
         return sb.toString();
     }
@@ -2195,7 +2205,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
             }
             draft.title = value;
         } else if (session.state == AdminState.DRAFT_EDIT_SIZE_INPUT) {
-            draft.size = value;
+            draft.size = normalizeSizeWithGender(value, draft.title);
         } else if (session.state == AdminState.DRAFT_EDIT_PRICE_INPUT) {
             Double price = parsePriceInput(value);
             if (price == null || price <= 0) {
@@ -2803,6 +2813,33 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
     }
 
+    private String normalizeSizeWithGender(String rawSize, String contextText) {
+        if (rawSize == null) return "";
+        String value = rawSize.trim();
+        if (value.isBlank()) return "";
+
+        String lower = value.toLowerCase(Locale.ROOT);
+        boolean female = lower.contains("žensk") || lower.contains("zensk") || lower.contains("female") || lower.contains("women");
+        boolean male = lower.contains("mušk") || lower.contains("musk") || lower.contains("male") || lower.contains("men");
+
+        String remainder = value
+                .replaceAll("(?iu)\\b(vel|size)\\b\\s*[-:]?\\s*", "")
+                .replaceAll("(?iu)\\b(muški|muski|muško|musko|ženski|zenski|žensko|zensko|female|male|women|men)\\b", "")
+                .trim();
+        remainder = remainder.replaceAll("^[-:]+\\s*", "").trim();
+
+        if (!female && !male) {
+            String ctx = contextText == null ? "" : contextText.toLowerCase(Locale.ROOT);
+            female = ctx.contains("žensk") || ctx.contains("zensk") || ctx.contains("female") || ctx.contains("women");
+            male = ctx.contains("mušk") || ctx.contains("musk") || ctx.contains("male") || ctx.contains("men");
+        }
+        String prefix = female ? "ženski" : "muški";
+        if (remainder.isBlank()) {
+            return prefix;
+        }
+        return prefix + " " + remainder;
+    }
+
     private void applyManualDiscount(long chatId, AdminSession session, double newPrice) {
         ProductCard card = db.findProductCardById(session.selectedProductId);
         if (card == null || (!"ACTIVE".equals(card.status) && !"RESERVED".equals(card.status))) {
@@ -3211,7 +3248,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         if (title.isBlank()) title = ai.title;
         if (title == null || title.isBlank()) title = "Telegram Listing";
 
-        String size = TextParser.extractSize(text);
+        String size = normalizeSizeWithGender(TextParser.extractSize(text), text);
         if (size.isBlank()) size = ai.size;
 
         String priceEur = TextParser.extractEur(text);
@@ -3542,7 +3579,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 return false;
             }
             String title = TextParser.extractTitle(text);
-            String size = TextParser.extractSize(text);
+            String size = normalizeSizeWithGender(TextParser.extractSize(text), text);
 
             String priceEur = TextParser.extractEur(text);
             String priceRsd = TextParser.extractRsd(text);

@@ -77,6 +77,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private static final String CB_ADD_PRODUCT_AI = "OPEN:ADD_PRODUCT_AI";
     private static final String CB_WITHOUT_PHOTO = "OPEN:WITHOUT_PHOTO";
     private static final String CB_SCHEDULED_POSTS = "OPEN:SCHEDULED_POSTS";
+    private static final String CB_SCHEDULE_PLAN = "OPEN:SCHEDULE_PLAN";
+    private static final String CB_SLOT_ADD = "SLOT:ADD";
     private static final String CB_PRODUCTS = "OPEN:PRODUCTS";
     private static final String CB_RESERVE = "OPEN:RESERVE";
     private static final String CB_UNRESERVE = "OPEN:UNRESERVE";
@@ -277,6 +279,12 @@ public class ShopifyBot extends TelegramLongPollingBot {
             answerCallback(callback, "");
             return;
         }
+        if (CB_SCHEDULE_PLAN.equals(data)) {
+            resetSession(session);
+            sendPublicationSlotsPage(chatId, 0, null);
+            answerCallback(callback, "");
+            return;
+        }
         if (CB_PRODUCTS.equals(data)) {
             resetSession(session);
             sendProductsPage(chatId, 0);
@@ -388,7 +396,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                     "Когда опубликовать?",
                     inlineSingleColumn(
                             button("Сейчас", CB_DRAFT_PUBLISH_NOW),
-                            button("Ко времени", CB_DRAFT_PUBLISH_TIME),
+                            button("Запланированная публикация", CB_DRAFT_PUBLISH_TIME),
                             button("Отменить", CB_CANCEL_FLOW)
                     ));
             answerCallback(callback, "");
@@ -410,12 +418,42 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 answerCallback(callback, "");
                 return;
             }
-            session.state = AdminState.DRAFT_SCHEDULE_INPUT;
+            offerDraftScheduleBySlots(chatId, session);
+            answerCallback(callback, "");
+            return;
+        }
+        if (CB_SLOT_ADD.equals(data)) {
+            session.state = AdminState.SCHEDULE_SLOT_INPUT;
             sendText(chatId,
-                    "Введите дату и время по Белграду в формате: 22.05, 20:00",
-                    inlineSingleColumn(
-                            button("Отменить", CB_CANCEL_FLOW)
-                    ));
+                    "Введите дату и время публикации по Белграду в формате: 22.05, 20:00",
+                    inlineSingleColumn(button("Отменить", CB_CANCEL_FLOW)));
+            answerCallback(callback, "");
+            return;
+        }
+        if (data.startsWith("SLOT:DEL:")) {
+            long slotId = 0;
+            try {
+                slotId = Long.parseLong(data.substring("SLOT:DEL:".length()));
+            } catch (Exception ignored) {
+            }
+            if (slotId > 0) {
+                db.deletePublicationSlot(slotId);
+            }
+            sendPublicationSlotsPage(chatId, 0, "🗑 Слот удален.");
+            answerCallback(callback, "");
+            return;
+        }
+        if (data.startsWith("DRAFT:SLOT:")) {
+            long slotId = 0;
+            try {
+                slotId = Long.parseLong(data.substring("DRAFT:SLOT:".length()));
+            } catch (Exception ignored) {
+            }
+            if (slotId <= 0) {
+                answerCallback(callback, "Некорректный слот");
+                return;
+            }
+            scheduleDraftWithSlot(chatId, session, slotId);
             answerCallback(callback, "");
             return;
         }
@@ -542,6 +580,17 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 page = 0;
             }
             sendScheduledPostsPage(chatId, page);
+            answerCallback(callback, "");
+            return;
+        }
+        if (data.startsWith("PAGE:SLOTS:")) {
+            int page;
+            try {
+                page = Integer.parseInt(data.substring("PAGE:SLOTS:".length()));
+            } catch (NumberFormatException e) {
+                page = 0;
+            }
+            sendPublicationSlotsPage(chatId, page, null);
             answerCallback(callback, "");
             return;
         }
@@ -697,7 +746,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                     "Когда опубликовать?",
                     inlineSingleColumn(
                             button("Сейчас", CB_DRAFT_PUBLISH_NOW),
-                            button("Ко времени", CB_DRAFT_PUBLISH_TIME),
+                            button("Запланированная публикация", CB_DRAFT_PUBLISH_TIME),
                             button("Отменить", CB_CANCEL_FLOW)
                     ));
             return;
@@ -796,8 +845,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
             return;
         }
 
-        if (session.state == AdminState.DRAFT_SCHEDULE_INPUT) {
-            queueDraftByDatetime(chatId, session, text);
+        if (session.state == AdminState.SCHEDULE_SLOT_INPUT) {
+            addPublicationSlotFromInput(chatId, session, text);
             return;
         }
 
@@ -2056,7 +2105,17 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 for (int gi = 0; gi < groups.size(); gi++) {
                     List<String> fileIds = groups.get(gi);
                     List<byte[]> images = new ArrayList<>();
-                    for (String fileId : fileIds) {
+                    List<String> aiFileIds = new ArrayList<>();
+                    if (!fileIds.isEmpty()) {
+                        aiFileIds.add(fileIds.get(0));
+                        if (fileIds.size() > 1) {
+                            String last = fileIds.get(fileIds.size() - 1);
+                            if (!last.equals(fileIds.get(0))) {
+                                aiFileIds.add(last);
+                            }
+                        }
+                    }
+                    for (String fileId : aiFileIds) {
                         try {
                             images.add(downloadFileBytes(fileId));
                         } catch (Exception e) {
@@ -2568,38 +2627,70 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
     }
 
-    private void queueDraftByDatetime(long chatId, AdminSession session, String rawInput) {
+    private void addPublicationSlotFromInput(long chatId, AdminSession session, String rawInput) {
+        Long publishAtEpoch = parseBelgradeDateInputToEpoch(rawInput);
+        if (publishAtEpoch == null) {
+            sendText(chatId, "Неверный формат. Используйте: 22.05, 20:00");
+            return;
+        }
+        db.addPublicationSlot(publishAtEpoch, session.userId > 0 ? session.userId : null);
+        session.state = AdminState.IDLE;
+        sendPublicationSlotsPage(chatId, 0, "✅ Слот публикации добавлен.");
+    }
+
+    private void offerDraftScheduleBySlots(long chatId, AdminSession session) {
+        long now = Instant.now().getEpochSecond();
+        db.deletePublicationSlotsPast(now);
+        List<Database.PublicationSlot> slots = db.listPublicationSlotsFuture(now, 100, 0);
+        if (slots.isEmpty()) {
+            sendText(chatId,
+                    "⛔ Нет настроенных слотов публикации.\nСначала добавьте дату и время в меню планирования.",
+                    inlineSingleColumn(
+                            button("🗓 Планирование публикаций", CB_SCHEDULE_PLAN),
+                            button("Отменить", CB_CANCEL_FLOW)
+                    ));
+            return;
+        }
+        if (slots.size() == 1) {
+            scheduleDraftWithSlot(chatId, session, slots.get(0).id);
+            return;
+        }
+        ZoneId belgrade = ZoneId.of("Europe/Belgrade");
+        List<InlineKeyboardButton> buttons = new ArrayList<>();
+        for (Database.PublicationSlot slot : slots) {
+            String label = Instant.ofEpochSecond(slot.publishAt).atZone(belgrade).format(BELGRADE_DT_SHOW);
+            buttons.add(button("🗓 " + label, "DRAFT:SLOT:" + slot.id));
+        }
+        buttons.add(button("Отменить", CB_CANCEL_FLOW));
+        sendText(chatId,
+                "Выберите слот публикации:",
+                inlineSingleColumn(buttons.toArray(new InlineKeyboardButton[0])));
+    }
+
+    private void scheduleDraftWithSlot(long chatId, AdminSession session, long slotId) {
+        Database.PublicationSlot slot = db.findPublicationSlotById(slotId);
+        if (slot == null) {
+            sendText(chatId, "Слот не найден.");
+            offerDraftScheduleBySlots(chatId, session);
+            return;
+        }
+        long now = Instant.now().getEpochSecond();
+        if (slot.publishAt <= now) {
+            db.deletePublicationSlot(slotId);
+            sendText(chatId, "Этот слот уже в прошлом и был удален.");
+            offerDraftScheduleBySlots(chatId, session);
+            return;
+        }
+        ZoneId belgrade = ZoneId.of("Europe/Belgrade");
+        String label = Instant.ofEpochSecond(slot.publishAt).atZone(belgrade).format(BELGRADE_DT_SHOW) + " (Belgrade)";
+        enqueueCurrentDraftAt(chatId, session, slot.publishAt, label);
+    }
+
+    private void enqueueCurrentDraftAt(long chatId, AdminSession session, long publishAtEpoch, String showLabel) {
         if (session.draft == null) {
             sendWelcomeMenu(chatId, "⚠️ Черновик не найден. Начните заново.");
             return;
         }
-        String input = rawInput == null ? "" : rawInput.trim();
-        LocalDateTime publishLocal;
-        try {
-            String compact = input.replaceAll("\\s+", " ");
-            java.util.regex.Matcher m = Pattern.compile("^(\\d{2})\\.(\\d{2}),\\s*(\\d{2}):(\\d{2})$").matcher(compact);
-            if (!m.matches()) {
-                throw new DateTimeParseException("Bad format", input, 0);
-            }
-            int day = Integer.parseInt(m.group(1));
-            int month = Integer.parseInt(m.group(2));
-            int hour = Integer.parseInt(m.group(3));
-            int minute = Integer.parseInt(m.group(4));
-            ZoneId belgrade = ZoneId.of("Europe/Belgrade");
-            int year = LocalDate.now(belgrade).getYear();
-            publishLocal = LocalDateTime.of(year, month, day, hour, minute);
-            LocalDateTime nowBelgrade = LocalDateTime.now(belgrade);
-            if (!publishLocal.isAfter(nowBelgrade)) {
-                sendText(chatId, "Указанное время уже прошло. Введите будущую дату/время по Белграду.");
-                return;
-            }
-        } catch (Exception e) {
-            sendText(chatId,
-                    "Неверный формат. Используйте: 22.05, 20:00",
-                    inlineSingleColumn(button("Отменить", CB_CANCEL_FLOW)));
-            return;
-        }
-
         DraftData draft = session.draft.copy();
         if (!isArticleEnabled()) {
             draft.article = generateInternalArticle();
@@ -2613,10 +2704,9 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
         try {
             ScheduledPayload payload = ScheduledPayload.fromDraft(draft);
-            long publishAtEpoch = publishLocal.atZone(ZoneId.of("Europe/Belgrade")).toEpochSecond();
             long taskId = db.enqueueScheduledPost(draft.mode.name(), mapper.writeValueAsString(payload), publishAtEpoch, chatId);
             String status = "✅ Пост поставлен в очередь.\nID: " + taskId +
-                    "\nПубликация: " + publishLocal.format(BELGRADE_DT_SHOW) + " (Belgrade)";
+                    "\nПубликация: " + showLabel;
             if (advanceToNextDraft(session)) {
                 sendText(chatId, status + "\n\n➡️ Переходим к следующему товару.");
                 sendDraftPreview(chatId, session, true);
@@ -2627,6 +2717,31 @@ public class ShopifyBot extends TelegramLongPollingBot {
         } catch (Exception e) {
             log.warn("Failed to enqueue scheduled draft", e);
             sendText(chatId, "❌ Не удалось поставить в очередь: " + e.getMessage());
+        }
+    }
+
+    private Long parseBelgradeDateInputToEpoch(String rawInput) {
+        String input = rawInput == null ? "" : rawInput.trim();
+        try {
+            String compact = input.replaceAll("\\s+", " ");
+            java.util.regex.Matcher m = Pattern.compile("^(\\d{2})\\.(\\d{2}),\\s*(\\d{2}):(\\d{2})$").matcher(compact);
+            if (!m.matches()) {
+                return null;
+            }
+            int day = Integer.parseInt(m.group(1));
+            int month = Integer.parseInt(m.group(2));
+            int hour = Integer.parseInt(m.group(3));
+            int minute = Integer.parseInt(m.group(4));
+            ZoneId belgrade = ZoneId.of("Europe/Belgrade");
+            int year = LocalDate.now(belgrade).getYear();
+            LocalDateTime publishLocal = LocalDateTime.of(year, month, day, hour, minute);
+            LocalDateTime nowBelgrade = LocalDateTime.now(belgrade);
+            if (!publishLocal.isAfter(nowBelgrade)) {
+                return null;
+            }
+            return publishLocal.atZone(belgrade).toEpochSecond();
+        } catch (Exception e) {
+            return null;
         }
     }
 
@@ -2645,6 +2760,45 @@ public class ShopifyBot extends TelegramLongPollingBot {
         session.draft = session.draftQueue.get(next);
         session.state = AdminState.DRAFT_EDIT_CHOICE;
         return true;
+    }
+
+    private void sendPublicationSlotsPage(long chatId, int page, String statusMessage) {
+        long now = Instant.now().getEpochSecond();
+        db.deletePublicationSlotsPast(now);
+        int pageSize = Math.max(1, config.listPageSize);
+        int total = db.countPublicationSlotsFuture(now);
+        int pages = Math.max(1, (int) Math.ceil(total / (double) pageSize));
+        int safePage = Math.max(0, Math.min(page, pages - 1));
+        List<Database.PublicationSlot> items = db.listPublicationSlotsFuture(now, pageSize, safePage * pageSize);
+
+        ZoneId belgrade = ZoneId.of("Europe/Belgrade");
+        StringBuilder sb = new StringBuilder();
+        sb.append("🗓 Планирование публикаций\n");
+        sb.append("Активных слотов: ").append(total).append("\n");
+        sb.append("Страница ").append(safePage + 1).append("/").append(pages).append("\n");
+        sb.append("Формат добавления: 22.05, 20:00 (Belgrade)\n");
+        if (items.isEmpty()) {
+            sb.append("\nСлоты не добавлены.");
+        } else {
+            for (Database.PublicationSlot slot : items) {
+                String label = Instant.ofEpochSecond(slot.publishAt).atZone(belgrade).format(BELGRADE_DT_SHOW);
+                sb.append("\n").append(slot.id).append(". ").append(label);
+            }
+        }
+        if (statusMessage != null && !statusMessage.isBlank()) {
+            sb.append("\n\n").append(statusMessage);
+        }
+
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+        appendPaginationRows(rows, "SLOTS", safePage, pages);
+        rows.add(List.of(button("➕ Добавить слот", CB_SLOT_ADD)));
+        for (Database.PublicationSlot slot : items) {
+            rows.add(List.of(button("🗑 Удалить слот #" + slot.id, "SLOT:DEL:" + slot.id)));
+        }
+        rows.add(List.of(button("⬅ Назад в меню", CB_MENU)));
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        markup.setKeyboard(rows);
+        sendText(chatId, sb.toString(), markup);
     }
 
     private void sendScheduledPostsPage(long chatId, int page) {
@@ -2890,6 +3044,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private InlineKeyboardMarkup buildMainInlineKeyboard() {
         return inlineSingleColumn(
                 button("➕ Добавить товар", CB_ADD_PRODUCT),
+                button("🗓 Планирование публикаций", CB_SCHEDULE_PLAN),
                 button("📅 Отложенные посты", CB_SCHEDULED_POSTS),
                 button("✏️ Редактировать пост", CB_EDIT_POST),
                 button("📦 Список товаров", CB_PRODUCTS),
@@ -3174,7 +3329,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         DRAFT_EDIT_PRICE_INPUT,
         DRAFT_EDIT_ARTICLE_INPUT,
         DRAFT_PUBLISH_CHOICE,
-        DRAFT_SCHEDULE_INPUT,
+        SCHEDULE_SLOT_INPUT,
         RESERVE_SELECT,
         UNRESERVE_SELECT,
         SOLD_SELECT,

@@ -94,7 +94,14 @@ public class Database {
                     "created_at INTEGER NOT NULL," +
                     "updated_at INTEGER NOT NULL" +
                     ")");
+            stmt.executeUpdate("CREATE TABLE IF NOT EXISTS publication_slots (" +
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT," +
+                    "publish_at INTEGER NOT NULL," +
+                    "created_by INTEGER," +
+                    "created_at INTEGER NOT NULL" +
+                    ")");
             stmt.executeUpdate("CREATE INDEX IF NOT EXISTS idx_scheduled_posts_status_time ON scheduled_posts(status, publish_at)");
+            stmt.executeUpdate("CREATE INDEX IF NOT EXISTS idx_publication_slots_publish_at ON publication_slots(publish_at)");
             stmt.executeUpdate("CREATE INDEX IF NOT EXISTS idx_product_cards_status ON product_cards(status)");
             stmt.executeUpdate("CREATE INDEX IF NOT EXISTS idx_product_cards_updated_at ON product_cards(updated_at)");
             try {
@@ -962,6 +969,106 @@ public class Database {
         }
     }
 
+    public long addPublicationSlot(long publishAtEpoch, Long createdBy) {
+        long now = Instant.now().getEpochSecond();
+        String sql = "INSERT INTO publication_slots(publish_at, created_by, created_at) VALUES(?,?,?)";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+            ps.setLong(1, publishAtEpoch);
+            if (createdBy == null) {
+                ps.setNull(2, Types.INTEGER);
+            } else {
+                ps.setLong(2, createdBy);
+            }
+            ps.setLong(3, now);
+            ps.executeUpdate();
+            try (ResultSet rs = ps.getGeneratedKeys()) {
+                if (rs.next()) return rs.getLong(1);
+            }
+            throw new RuntimeException("DB addPublicationSlot failed: no generated id");
+        } catch (SQLException e) {
+            throw new RuntimeException("DB addPublicationSlot failed", e);
+        }
+    }
+
+    public int countPublicationSlotsFuture(long nowEpoch) {
+        String sql = "SELECT COUNT(*) FROM publication_slots WHERE publish_at>=?";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, nowEpoch);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return rs.getInt(1);
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("DB countPublicationSlotsFuture failed", e);
+        }
+        return 0;
+    }
+
+    public List<PublicationSlot> listPublicationSlotsFuture(long nowEpoch, int limit, int offset) {
+        List<PublicationSlot> items = new ArrayList<>();
+        String sql = "SELECT id, publish_at, created_by, created_at FROM publication_slots " +
+                "WHERE publish_at>=? ORDER BY publish_at ASC, id ASC LIMIT ? OFFSET ?";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, nowEpoch);
+            ps.setInt(2, limit);
+            ps.setInt(3, offset);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    Number createdByNum = (Number) rs.getObject(3);
+                    items.add(new PublicationSlot(
+                            rs.getLong(1),
+                            rs.getLong(2),
+                            createdByNum == null ? null : createdByNum.longValue(),
+                            rs.getLong(4)
+                    ));
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("DB listPublicationSlotsFuture failed", e);
+        }
+        return items;
+    }
+
+    public PublicationSlot findPublicationSlotById(long slotId) {
+        String sql = "SELECT id, publish_at, created_by, created_at FROM publication_slots WHERE id=? LIMIT 1";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, slotId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    Number createdByNum = (Number) rs.getObject(3);
+                    return new PublicationSlot(
+                            rs.getLong(1),
+                            rs.getLong(2),
+                            createdByNum == null ? null : createdByNum.longValue(),
+                            rs.getLong(4)
+                    );
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("DB findPublicationSlotById failed", e);
+        }
+        return null;
+    }
+
+    public void deletePublicationSlot(long slotId) {
+        String sql = "DELETE FROM publication_slots WHERE id=?";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, slotId);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("DB deletePublicationSlot failed", e);
+        }
+    }
+
+    public void deletePublicationSlotsPast(long nowEpoch) {
+        String sql = "DELETE FROM publication_slots WHERE publish_at<?";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, nowEpoch);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("DB deletePublicationSlotsPast failed", e);
+        }
+    }
+
     public void updateProductCardPricing(long productId, double currentPriceRsd, int discountPercent, Double fixedPriceRsd) {
         String sql = "UPDATE product_cards SET current_price_rsd=?, discount_percent=?, fixed_price_rsd=?, updated_at=? WHERE product_id=?";
         try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -1155,6 +1262,20 @@ public class Database {
             this.lastError = lastError;
             this.createdAt = createdAt;
             this.updatedAt = updatedAt;
+        }
+    }
+
+    public static class PublicationSlot {
+        public final long id;
+        public final long publishAt;
+        public final Long createdBy;
+        public final long createdAt;
+
+        public PublicationSlot(long id, long publishAt, Long createdBy, long createdAt) {
+            this.id = id;
+            this.publishAt = publishAt;
+            this.createdBy = createdBy;
+            this.createdAt = createdAt;
         }
     }
 }

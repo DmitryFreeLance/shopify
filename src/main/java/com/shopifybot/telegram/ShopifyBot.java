@@ -3083,15 +3083,22 @@ public class ShopifyBot extends TelegramLongPollingBot {
     }
 
     private InlineKeyboardMarkup buildMainInlineKeyboard() {
-        return inlineSingleColumn(
-                button("➕ Добавить товар", CB_ADD_PRODUCT),
-                button("🗓 Планирование публикаций", CB_SCHEDULE_PLAN),
-                button("📅 Отложенные посты", CB_SCHEDULED_POSTS),
-                button("✏️ Редактировать пост", CB_EDIT_POST),
-                button("📦 Список товаров", CB_PRODUCTS),
-                button("🟡 Зарезервировать", CB_RESERVE),
-                button("🟢 Снять резерв", CB_UNRESERVE),
-                button("✅ Продано", CB_SOLD)
+        return inlineRows(
+                List.of(button("➕ Добавить товар", CB_ADD_PRODUCT)),
+                List.of(button("🗓 Планирование публикаций", CB_SCHEDULE_PLAN)),
+                List.of(
+                        button("📅 Отложенные", CB_SCHEDULED_POSTS),
+                        button("✏️ Редактировать", CB_EDIT_POST)
+                ),
+                List.of(button("📦 Список товаров", CB_PRODUCTS)),
+                List.of(
+                        button("🟡 Зарезервировать", CB_RESERVE),
+                        button("🟢 Снять резерв", CB_UNRESERVE)
+                ),
+                List.of(
+                        button("🧾 Скидки", CB_DISCOUNTS),
+                        button("✅ Продано", CB_SOLD)
+                )
         );
     }
 
@@ -3110,6 +3117,13 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         markup.setKeyboard(rows);
+        return markup;
+    }
+
+    @SafeVarargs
+    private final InlineKeyboardMarkup inlineRows(List<InlineKeyboardButton>... rows) {
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        markup.setKeyboard(List.of(rows));
         return markup;
     }
 

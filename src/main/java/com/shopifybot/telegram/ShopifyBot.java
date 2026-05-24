@@ -89,6 +89,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private static final String CB_DISCOUNTS = "OPEN:DISCOUNTS";
     private static final String CB_DISCOUNTS_DISABLE = "DISCOUNT:DISABLE";
     private static final String CB_DISCOUNTS_ENABLE = "DISCOUNT:ENABLE";
+    private static final String CB_DISCOUNTS_RESET = "DISCOUNT:RESET";
     private static final String CB_MANUAL_DISCOUNT = "OPEN:MANUAL_DISCOUNT";
     private static final String CB_DONE_PHOTOS = "FLOW:DONE_PHOTOS";
     private static final String CB_BACK_TO_PHOTOS = "FLOW:BACK_TO_PHOTOS";
@@ -350,11 +351,17 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
         if (CB_DISCOUNTS_ENABLE.equals(data)) {
             db.setMeta(META_DISCOUNT_ENABLED, "true");
+            db.setMeta("discount:last_sync_date", "");
+            sendDiscountsDashboard(chatId, "▶️ Прогрессивные скидки включены.");
+            answerCallback(callback, "Скидки включены");
+            return;
+        }
+        if (CB_DISCOUNTS_RESET.equals(data)) {
             String today = todayInDiscountZone().toString();
             db.setMeta(META_DISCOUNT_RESET_START, today);
             db.setMeta("discount:last_sync_date", "");
-            sendDiscountsDashboard(chatId, "▶️ Прогрессивные скидки включены.\nДля новых товаров цикл начинается с дня 1 (0%).");
-            answerCallback(callback, "Скидки включены");
+            sendDiscountsDashboard(chatId, "🔁 Цикл скидок сброшен.\nНовые товары пойдут с дня 1 (0%).");
+            answerCallback(callback, "Цикл сброшен");
             return;
         }
         if (CB_MANUAL_DISCOUNT.equals(data)) {
@@ -1876,10 +1883,13 @@ public class ShopifyBot extends TelegramLongPollingBot {
         text.append("Сегодня: ").append(dateLabel).append("\n");
         text.append("День цикла: ").append(dayInfo).append("\n");
         text.append("Текущий этап: ").append(phase).append("\n");
+        text.append("Скидочный день недели: воскресенье.\n");
         text.append("\n");
-        text.append("Автосистема применяет изменения 1 раз в день.\n");
-        text.append("Базовая прогрессия по возрасту: 0% → 15% → 30% → 50%.\n");
+        text.append("Автосистема применяет изменения 1 раз в день (до 09:00 Belgrade).\n");
+        text.append("Прогрессия: каждое воскресенье 0% → 15% → 30% → 50%.\n");
         text.append("Последняя неделя месяца: Пн 20%, Вт 30%, Ср 40%, Чт 50%, Пт 500, Сб/Вс 350.");
+        text.append("\n");
+        text.append(buildDiscountGroupSummary(cards, today));
         text.append("\n\nТовары в работе: ").append(cards.size());
         if (cards.isEmpty()) {
             text.append("\nСписок пуст.");
@@ -1927,6 +1937,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 : button("▶️ Включить скидки", CB_DISCOUNTS_ENABLE);
         sendText(chatId, text.toString(), inlineSingleColumn(
                 toggle,
+                button("🔁 Сбросить цикл", CB_DISCOUNTS_RESET),
                 button("🏷 Скидка на товар", CB_MANUAL_DISCOUNT),
                 button("⬅ Назад в меню", CB_MENU)
         ));
@@ -1972,6 +1983,31 @@ public class ShopifyBot extends TelegramLongPollingBot {
         return "последняя неделя: все по 350";
     }
 
+    private String buildDiscountGroupSummary(List<ProductCard> cards, LocalDate today) {
+        int g0 = 0, g15 = 0, g20 = 0, g30 = 0, g40 = 0, g50 = 0, g500 = 0, g350 = 0, gOther = 0;
+        for (ProductCard card : cards) {
+            DiscountTarget target = calculateDiscountTarget(card, today);
+            if (target == null) continue;
+            if (target.fixedPriceRsd != null) {
+                if (Math.abs(target.fixedPriceRsd - 500.0) < 0.01) g500++;
+                else if (Math.abs(target.fixedPriceRsd - 350.0) < 0.01) g350++;
+                else gOther++;
+                continue;
+            }
+            int d = target.discountPercent;
+            if (d <= 0) g0++;
+            else if (d <= 15) g15++;
+            else if (d <= 20) g20++;
+            else if (d <= 30) g30++;
+            else if (d <= 40) g40++;
+            else if (d <= 50) g50++;
+            else gOther++;
+        }
+        return "Группы по авто-скидкам сегодня:\n" +
+                "0%: " + g0 + " | 15%: " + g15 + " | 20%: " + g20 + " | 30%: " + g30 + " | 40%: " + g40 + " | 50%: " + g50 +
+                "\n500 RSD: " + g500 + " | 350 RSD: " + g350 + (gOther > 0 ? " | прочее: " + gOther : "");
+    }
+
     private String describeDiscountDay(LocalDate today) {
         String dow;
         switch (today.getDayOfWeek()) {
@@ -1996,6 +2032,11 @@ public class ShopifyBot extends TelegramLongPollingBot {
             default:
                 dow = "Вс";
                 break;
+        }
+        LocalDate reset = getDiscountResetStartDate();
+        if (reset != null && !today.isBefore(reset)) {
+            long cycleDay = java.time.temporal.ChronoUnit.DAYS.between(reset, today) + 1;
+            return dow + ", день месяца " + today.getDayOfMonth() + ", день цикла " + cycleDay;
         }
         return dow + ", день месяца " + today.getDayOfMonth();
     }
@@ -3231,19 +3272,10 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 .atZone(discountZone == null ? ZoneId.systemDefault() : discountZone)
                 .toLocalDate();
         LocalDate resetStart = getDiscountResetStartDate();
-        boolean hadDiscountBeforeReset = resetStart != null
-                && createdAtDate.isBefore(resetStart)
-                && (card.fixedPriceRsd != null || card.discountPercent > 0);
-        if (hadDiscountBeforeReset) {
-            return new DiscountTarget(card.discountPercent, card.currentPriceRsd, card.fixedPriceRsd);
-        }
         LocalDate ageStart = createdAtDate;
-        if (resetStart != null && resetStart.isAfter(ageStart) && (card.fixedPriceRsd == null && card.discountPercent <= 0)) {
-            ageStart = resetStart;
-        }
+        int sundaySteps = countSundaySteps(ageStart, today);
+        int discount = sundaySteps <= 0 ? 0 : sundaySteps == 1 ? 15 : sundaySteps == 2 ? 30 : 50;
         long ageDays = Math.max(0, java.time.temporal.ChronoUnit.DAYS.between(ageStart, today));
-        int ageWeeks = (int) (ageDays / 7L);
-        int discount = ageWeeks <= 0 ? 0 : ageWeeks == 1 ? 15 : ageWeeks == 2 ? 30 : 50;
 
         YearMonth ym = YearMonth.from(today);
         Double fixed = null;
@@ -3282,6 +3314,14 @@ public class ShopifyBot extends TelegramLongPollingBot {
             effectiveDiscount = discount;
         }
         return new DiscountTarget(effectiveDiscount, price, fixed);
+    }
+
+    private int countSundaySteps(LocalDate start, LocalDate today) {
+        if (start == null || today == null || today.isBefore(start)) return 0;
+        LocalDate firstSunday = start.with(java.time.temporal.TemporalAdjusters.nextOrSame(java.time.DayOfWeek.SUNDAY));
+        if (firstSunday.isAfter(today)) return 0;
+        long days = java.time.temporal.ChronoUnit.DAYS.between(firstSunday, today);
+        return (int) (days / 7L) + 1;
     }
 
     private int discountPercentByFixed(double basePrice, double fixedPrice) {

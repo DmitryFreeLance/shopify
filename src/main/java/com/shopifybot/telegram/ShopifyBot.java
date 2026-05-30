@@ -2239,10 +2239,13 @@ public class ShopifyBot extends TelegramLongPollingBot {
             prompt = "Extract product card fields from photos and return only JSON:\n" +
                     "{\n" +
                     "  \"brand\": \"title/brand\",\n" +
-                    "  \"size\": \"size text\",\n" +
+                    "  \"item_type\": \"short type like top/leggings/hoodie/jeans\",\n" +
+                    "  \"gender\": \"ženski or muški\",\n" +
+                    "  \"size\": \"must include gender prefix, e.g. 'ženski XS' or 'muški L'\",\n" +
                     "  \"price_rsd\": \"number only\"" +
                     (articleEnabled ? ",\n  \"article\": \"8 digits or empty\"\n" : "\n") +
                     "}\n" +
+                    "Rules: if item is top/crop top/bralette/leggings/skirt/dress/bikini, use gender=ženski.\n" +
                     "No markdown, no extra text.";
         }
 
@@ -2258,7 +2261,9 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 JsonNode node = parseAiJson(raw);
                 DraftData draft = new DraftData();
                 draft.title = readAiString(node, "brand", withoutPhotoMode ? "Без фото" : "Товар");
-                draft.size = normalizeSizeWithGender(readAiString(node, "size", ""), draft.title);
+                String itemType = readAiString(node, "item_type", "");
+                String gender = readAiString(node, "gender", "");
+                draft.size = normalizeSizeWithGender(readAiString(node, "size", ""), draft.title + " " + itemType + " " + gender);
                 draft.priceRsd = parseAiPrice(node.path("price_rsd").asText(""));
                 draft.article = readAiString(node, "article", "");
                 if (withoutPhotoMode) {
@@ -3196,25 +3201,55 @@ public class ShopifyBot extends TelegramLongPollingBot {
         if (value.isBlank()) return "";
 
         String lower = value.toLowerCase(Locale.ROOT);
-        boolean female = lower.contains("žensk") || lower.contains("zensk") || lower.contains("female") || lower.contains("women");
-        boolean male = lower.contains("mušk") || lower.contains("musk") || lower.contains("male") || lower.contains("men");
+        boolean female = containsFemaleHint(lower);
+        boolean male = containsMaleHint(lower);
 
         String remainder = value
                 .replaceAll("(?iu)\\b(vel|size)\\b\\s*[-:]?\\s*", "")
-                .replaceAll("(?iu)\\b(muški|muski|muško|musko|ženski|zenski|žensko|zensko|female|male|women|men)\\b", "")
+                .replaceAll("(?iu)\\b(muški|muski|muško|musko|ženski|zenski|žensko|zensko|female|male|women|woman|men|man|женск|мужск)\\b", "")
                 .trim();
         remainder = remainder.replaceAll("^[-:]+\\s*", "").trim();
 
         if (!female && !male) {
             String ctx = contextText == null ? "" : contextText.toLowerCase(Locale.ROOT);
-            female = ctx.contains("žensk") || ctx.contains("zensk") || ctx.contains("female") || ctx.contains("women");
-            male = ctx.contains("mušk") || ctx.contains("musk") || ctx.contains("male") || ctx.contains("men");
+            female = containsFemaleHint(ctx);
+            male = containsMaleHint(ctx);
         }
         String prefix = female ? "ženski" : "muški";
         if (remainder.isBlank()) {
             return prefix;
         }
         return prefix + " " + remainder;
+    }
+
+    private boolean containsFemaleHint(String text) {
+        if (text == null || text.isBlank()) return false;
+        return text.contains("žensk")
+                || text.contains("zensk")
+                || text.contains("female")
+                || text.contains("women")
+                || text.contains("woman")
+                || text.contains("женск")
+                || text.contains("top")
+                || text.contains("crop")
+                || text.contains("bralet")
+                || text.contains("grudnjak")
+                || text.contains("bikini")
+                || text.contains("suknja")
+                || text.contains("haljina")
+                || text.contains("tajice")
+                || text.contains("helanke")
+                || text.contains("leggings");
+    }
+
+    private boolean containsMaleHint(String text) {
+        if (text == null || text.isBlank()) return false;
+        return text.contains("mušk")
+                || text.contains("musk")
+                || text.contains("male")
+                || text.contains("men")
+                || text.contains("man")
+                || text.contains("мужск");
     }
 
     private void applyManualDiscount(long chatId, AdminSession session, double newPrice) {

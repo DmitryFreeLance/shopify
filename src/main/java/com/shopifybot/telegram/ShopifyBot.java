@@ -70,6 +70,7 @@ import java.util.regex.Pattern;
 public class ShopifyBot extends TelegramLongPollingBot {
     private static final Logger log = LoggerFactory.getLogger(ShopifyBot.class);
     private static final String ORDER_CONTACT_FOOTER = "Ako želite da naručite neku stvar, pošaljite fotografiju ove stvari @alinka809 ili @hlestovdmitry";
+    private static final Pattern SHOPIFY_ID_FOOTER_PATTERN = Pattern.compile("(?is)(?:<br>\\s*)*ID:\\s*\\d+\\s*$");
     private static final String CB_MENU = "MENU";
     private static final String CB_NOOP = "NOOP";
     private static final String CB_ADD_PRODUCT = "OPEN:ADD_PRODUCT";
@@ -156,6 +157,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
             if (!db.hasMetaKey(META_ARTICLE_ENABLED)) {
                 db.setMeta(META_ARTICLE_ENABLED, "false");
             }
+            scheduler.schedule(() -> workers.submit(this::backfillShopifyProductIdFooterSafe), 30, TimeUnit.SECONDS);
             log.info("Shop currency detected: {}", shopCurrency);
             log.info("Admins loaded: {}", config.adminUserIds.size());
             log.info("Collections ensured");
@@ -1031,6 +1033,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 }
 
                 productId = shopify.createProduct(payload);
+                ensureShopifyBodyHasProductId(productId, payload.title, payload.bodyHtml, payload.priceEur, payload.size, payload.barcode);
                 if (config.shopifyPublishAll) {
                     try {
                         shopify.publishProductToAll(productId);
@@ -1348,6 +1351,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 }
 
                 newProductId = shopify.createProduct(payload);
+                ensureShopifyBodyHasProductId(newProductId, payload.title, payload.bodyHtml, payload.priceEur, payload.size, payload.barcode);
                 if (config.shopifyPublishAll) {
                     try {
                         shopify.publishProductToAll(newProductId);
@@ -1504,7 +1508,9 @@ public class ShopifyBot extends TelegramLongPollingBot {
                         .append(card.title)
                         .append(" | ")
                         .append(formatRsd(card.currentPriceRsd))
-                        .append(" RSD");
+                        .append(" RSD")
+                        .append(" | ID: ")
+                        .append(card.productId);
                 if (articleEnabled && card.article != null && !card.article.isBlank()) {
                     sb.append(" | Artikal: ").append(card.article);
                 } else if (card.size != null && !card.size.isBlank()) {
@@ -1607,7 +1613,9 @@ public class ShopifyBot extends TelegramLongPollingBot {
                         .append(card.title)
                         .append(" | ")
                         .append(formatRsd(card.currentPriceRsd))
-                        .append(" RSD");
+                        .append(" RSD")
+                        .append(" | ID: ")
+                        .append(card.productId);
                 if (articleEnabled && card.article != null && !card.article.isBlank()) {
                     sb.append(" | Artikal: ").append(card.article);
                 } else if (card.size != null && !card.size.isBlank()) {
@@ -1752,6 +1760,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 .append(" | ")
                 .append(formatRsd(card.currentPriceRsd))
                 .append(" RSD\n");
+        sb.append("ID: ").append(card.productId).append("\n");
         sb.append("Artikal: ").append(card.article).append("\n");
         sb.append("Статус: ").append(statusLabel(card.status));
         if (ordinal != null && ordinal > 0) {
@@ -1809,7 +1818,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         String shopifyTitle = "RESERVED".equals(status) ? ("REZERVISANO | " + card.title) : card.title;
         String captionCore = buildProductCaption(card.title, card.size, card.basePriceRsd, currentPriceRsd, card.article, discountPercent, fixedPriceRsd, status);
         String telegramCaption = buildTelegramPostCaption(captionCore);
-        String bodyHtml = captionCore.replace("\n", "<br>");
+        String bodyHtml = withShopifyProductIdFooterHtml(captionCore.replace("\n", "<br>"), card.productId);
 
         shopify.updateProduct(
                 card.productId,
@@ -2676,6 +2685,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         PublishResult pub = null;
         try {
             productId = shopify.createProduct(payload);
+            ensureShopifyBodyHasProductId(productId, payload.title, payload.bodyHtml, payload.priceEur, payload.size, payload.barcode);
             if (draft.mode == DraftMode.POS_ONLY) {
                 shopify.publishProductToPosOnly(productId);
             } else if (config.shopifyPublishAll) {
@@ -3041,6 +3051,80 @@ public class ShopifyBot extends TelegramLongPollingBot {
         if (message == null) return false;
         String lower = message.toLowerCase(Locale.ROOT);
         return lower.contains("429") || lower.contains("too many requests") || lower.contains("rate limit");
+    }
+
+    private String withShopifyProductIdFooterHtml(String bodyHtml, long productId) {
+        String base = bodyHtml == null ? "" : bodyHtml.trim();
+        base = SHOPIFY_ID_FOOTER_PATTERN.matcher(base).replaceFirst("").trim();
+        if (base.isBlank()) {
+            return "ID: " + productId;
+        }
+        return base + "<br><br>ID: " + productId;
+    }
+
+    private void ensureShopifyBodyHasProductId(long productId, String title, String bodyHtml, String price, String size, String barcode) {
+        if (productId <= 0 || price == null || price.isBlank()) {
+            return;
+        }
+        try {
+            ShopifyProductSnapshot snap = shopify.getProductSnapshot(productId);
+            String currentBody = snap.bodyHtml == null ? "" : snap.bodyHtml;
+            String desiredBody = withShopifyProductIdFooterHtml(
+                    (bodyHtml == null || bodyHtml.isBlank()) ? currentBody : bodyHtml,
+                    productId
+            );
+            if (desiredBody.equals(currentBody)) {
+                return;
+            }
+            String finalTitle = (title == null || title.isBlank()) ? snap.title : title;
+            String finalSize = size == null ? "" : size;
+            String finalBarcode = (barcode == null || barcode.isBlank()) ? snap.variantBarcode : barcode;
+            shopify.updateProduct(productId, snap.variantId, finalTitle, desiredBody, price, finalSize, finalBarcode);
+        } catch (Exception e) {
+            log.warn("Failed to set ID footer in Shopify description for product {}", productId, e);
+        }
+    }
+
+    private void backfillShopifyProductIdFooterSafe() {
+        try {
+            backfillShopifyProductIdFooter();
+        } catch (Exception e) {
+            log.warn("Shopify ID footer backfill failed", e);
+        }
+    }
+
+    private void backfillShopifyProductIdFooter() {
+        List<ProductCard> cards = db.listCardsForSync();
+        if (cards.isEmpty()) {
+            return;
+        }
+        int updated = 0;
+        for (ProductCard card : cards) {
+            try {
+                ShopifyProductSnapshot snap = shopify.getProductSnapshot(card.productId);
+                String desired = withShopifyProductIdFooterHtml(snap.bodyHtml, card.productId);
+                if (!desired.equals(snap.bodyHtml)) {
+                    String price = formatPriceForShopify(card.currentPriceRsd);
+                    String size = card.size == null ? "" : card.size;
+                    String barcode = card.article == null ? "" : card.article;
+                    shopify.updateProduct(card.productId, snap.variantId, snap.title, desired, price, size, barcode);
+                    updated++;
+                }
+                if (config.productSyncDelayMs > 0) {
+                    Thread.sleep(config.productSyncDelayMs);
+                }
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return;
+            } catch (Exception e) {
+                if (contains429(e.getMessage())) {
+                    log.warn("Rate limited during Shopify ID footer backfill, stopping current pass");
+                    break;
+                }
+                log.warn("Failed to backfill Shopify ID footer for product {}", card.productId, e);
+            }
+        }
+        log.info("Shopify ID footer backfill finished. updated={}", updated);
     }
 
     private void sleepQuietly(long ms) {
@@ -3778,6 +3862,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         payload.images = images;
 
         long productId = shopify.createProduct(payload);
+        ensureShopifyBodyHasProductId(productId, payload.title, payload.bodyHtml, payload.priceEur, payload.size, payload.barcode);
         if (telegramLink != null && !telegramLink.isBlank()) {
             try {
                 shopify.setProductMetafield(productId,
@@ -4088,6 +4173,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
 
             String telegramLink = buildTelegramLink(channelId, messageId);
             String bodyHtml = buildDescription(text, "", priceSelection, discount, telegramLink);
+            bodyHtml = withShopifyProductIdFooterHtml(bodyHtml, productId);
             ShopifyProductSnapshot snap = shopify.getProductSnapshot(productId);
             shopify.updateProduct(productId, snap.variantId, title, bodyHtml, priceSelection.price, size, article);
             log.info("Product {} updated from edited message {}", productId, messageId);

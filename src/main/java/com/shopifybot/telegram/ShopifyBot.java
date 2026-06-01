@@ -99,6 +99,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private static final String CB_SEARCH_RESERVE = "SEARCH:RESERVE";
     private static final String CB_SEARCH_UNRESERVE = "SEARCH:UNRESERVE";
     private static final String CB_SEARCH_SOLD = "SEARCH:SOLD";
+    private static final String CB_SEARCH_RESERVE_ID = "SEARCH:RESERVE_ID";
+    private static final String CB_SEARCH_SOLD_ID = "SEARCH:SOLD_ID";
     private static final String CB_SEARCH_MANUAL = "SEARCH:MANUAL";
     private static final String CB_SEARCH_EDIT = "SEARCH:EDIT";
     private static final String CB_SEARCH_EDIT_ID = "SEARCH:EDIT_ID";
@@ -568,6 +570,20 @@ public class ShopifyBot extends TelegramLongPollingBot {
             answerCallback(callback, "");
             return;
         }
+        if (CB_SEARCH_RESERVE_ID.equals(data)) {
+            session.state = AdminState.PRODUCT_ID_SEARCH_INPUT;
+            session.searchScope = ProductSearchScope.RESERVE;
+            sendProductIdSearchPrompt(chatId, "резерва");
+            answerCallback(callback, "");
+            return;
+        }
+        if (CB_SEARCH_SOLD_ID.equals(data)) {
+            session.state = AdminState.PRODUCT_ID_SEARCH_INPUT;
+            session.searchScope = ProductSearchScope.SOLD;
+            sendProductIdSearchPrompt(chatId, "продажи");
+            answerCallback(callback, "");
+            return;
+        }
         if (CB_SEARCH_MANUAL.equals(data)) {
             session.state = AdminState.ARTICLE_SEARCH_INPUT;
             session.searchScope = ProductSearchScope.MANUAL;
@@ -831,7 +847,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                         ));
                 return;
             }
-            processEditSearchByProductId(chatId, session, productId);
+            processSearchByProductId(chatId, session, productId);
             return;
         }
 
@@ -1640,6 +1656,24 @@ public class ShopifyBot extends TelegramLongPollingBot {
             } else {
                 rows.add(List.of(button("🆔 Поиск по ID", CB_SEARCH_EDIT_ID)));
             }
+        } else if ("RESERVE".equals(scope)) {
+            if (isArticleEnabled()) {
+                rows.add(List.of(
+                        button("🔎 Поиск по артиклу", CB_SEARCH_RESERVE),
+                        button("🆔 Поиск по ID", CB_SEARCH_RESERVE_ID)
+                ));
+            } else {
+                rows.add(List.of(button("🆔 Поиск по ID", CB_SEARCH_RESERVE_ID)));
+            }
+        } else if ("SOLD".equals(scope)) {
+            if (isArticleEnabled()) {
+                rows.add(List.of(
+                        button("🔎 Поиск по артиклу", CB_SEARCH_SOLD),
+                        button("🆔 Поиск по ID", CB_SEARCH_SOLD_ID)
+                ));
+            } else {
+                rows.add(List.of(button("🆔 Поиск по ID", CB_SEARCH_SOLD_ID)));
+            }
         } else if (isArticleEnabled()) {
             rows.add(List.of(button("🔎 Поиск по артиклу", searchCallbackForScope(scope))));
         }
@@ -1684,6 +1718,14 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private void sendEditIdSearchPrompt(long chatId) {
         sendText(chatId,
                 "🆔 Введите ID товара из Shopify.\nПример: 15086220312948",
+                inlineSingleColumn(
+                        button("Отменить", CB_CANCEL_FLOW)
+                ));
+    }
+
+    private void sendProductIdSearchPrompt(long chatId, String actionLabel) {
+        sendText(chatId,
+                "🆔 Введите ID товара из Shopify для " + actionLabel + ".\nПример: 15086220312948",
                 inlineSingleColumn(
                         button("Отменить", CB_CANCEL_FLOW)
                 ));
@@ -1772,22 +1814,54 @@ public class ShopifyBot extends TelegramLongPollingBot {
         sendText(chatId, sb.toString());
     }
 
-    private void processEditSearchByProductId(long chatId, AdminSession session, long productId) {
+    private void processSearchByProductId(long chatId, AdminSession session, long productId) {
+        ProductSearchScope scope = session.searchScope == null ? ProductSearchScope.EDIT : session.searchScope;
         ProductCard card = db.findProductCardById(productId);
-        if (card == null || (!"ACTIVE".equals(card.status) && !"RESERVED".equals(card.status))) {
-            sendText(chatId, "Товар с таким ID не найден среди активных/зарезервированных.");
+        if (card == null) {
+            sendText(chatId, "Товар с таким ID не найден.");
             return;
         }
-        Integer ordinal = db.findVisibleOrdinalByProductId(card.productId);
-        StringBuilder sb = new StringBuilder();
-        sb.append("✅ Найдено по ID:\n");
-        sb.append(card.title).append(" | ").append(formatRsd(card.currentPriceRsd)).append(" RSD\n");
-        sb.append("ID: ").append(card.productId);
-        if (ordinal != null && ordinal > 0) {
-            sb.append("\nНомер в списке: ").append(ordinal);
+
+        if (scope == ProductSearchScope.EDIT) {
+            if (!"ACTIVE".equals(card.status) && !"RESERVED".equals(card.status)) {
+                sendText(chatId, "Товар с таким ID не найден среди активных/зарезервированных.");
+                return;
+            }
+            Integer ordinal = db.findVisibleOrdinalByProductId(card.productId);
+            StringBuilder sb = new StringBuilder();
+            sb.append("✅ Найдено по ID:\n");
+            sb.append(card.title).append(" | ").append(formatRsd(card.currentPriceRsd)).append(" RSD\n");
+            sb.append("ID: ").append(card.productId);
+            if (ordinal != null && ordinal > 0) {
+                sb.append("\nНомер в списке: ").append(ordinal);
+            }
+            sendText(chatId, sb.toString());
+            beginEditFlow(chatId, session, card);
+            return;
         }
-        sendText(chatId, sb.toString());
-        beginEditFlow(chatId, session, card);
+
+        if (scope == ProductSearchScope.RESERVE || scope == ProductSearchScope.SOLD) {
+            if (!"ACTIVE".equals(card.status) && !"RESERVED".equals(card.status)) {
+                sendText(chatId, "Товар с таким ID не найден среди активных/зарезервированных.");
+                return;
+            }
+            Integer ordinal = db.findVisibleOrdinalByProductId(card.productId);
+            if (ordinal == null || ordinal <= 0) {
+                sendText(chatId, "Товар найден, но не отображается в текущем списке. Попробуйте снова.");
+                return;
+            }
+            StringBuilder sb = new StringBuilder();
+            sb.append("✅ Найдено по ID:\n");
+            sb.append(card.title).append(" | ").append(formatRsd(card.currentPriceRsd)).append(" RSD\n");
+            sb.append("ID: ").append(card.productId).append("\n");
+            sb.append("Номер в списке: ").append(ordinal).append("\n");
+            sb.append("Введите этот номер цифрой для действия.");
+            sendText(chatId, sb.toString());
+            session.state = (scope == ProductSearchScope.RESERVE) ? AdminState.RESERVE_SELECT : AdminState.SOLD_SELECT;
+            return;
+        }
+
+        sendText(chatId, "Поиск по ID для этого раздела пока не поддерживается.");
     }
 
     private void markCardAsSold(ProductCard card) throws IOException {

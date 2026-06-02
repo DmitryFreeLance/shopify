@@ -659,6 +659,21 @@ public class Database {
         return listProductsByStatuses(10000, 0, "status IN ('ACTIVE','RESERVED','POS_ONLY')");
     }
 
+    public List<ProductCard> listCardsForSync(int limit, int offset) {
+        return listProductsByStatuses(limit, offset, "status IN ('ACTIVE','RESERVED','POS_ONLY')");
+    }
+
+    public int countCardsForSync() {
+        String sql = "SELECT COUNT(*) FROM product_cards WHERE status IN ('ACTIVE','RESERVED','POS_ONLY')";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getInt(1) : 0;
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("DB countCardsForSync failed", e);
+        }
+    }
+
     private List<ProductCard> listProductsByStatuses(int limit, int offset, String whereClause) {
         List<ProductCard> items = new ArrayList<>();
         String sql = "SELECT product_id, channel_id, message_id, media_group_id, title, size, description, article, " +

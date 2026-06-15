@@ -519,6 +519,14 @@ public class ShopifyClient {
                 .build();
         try (Response response = http.newCall(request).execute()) {
             if (!response.isSuccessful()) {
+                String responseBody = response.body() == null ? "" : response.body().string();
+                String details = responseBody == null ? "" : responseBody.trim();
+                if (details.length() > 500) {
+                    details = details.substring(0, 500);
+                }
+                if (!details.isBlank()) {
+                    throw new IOException("Shopify POST failed: " + response.code() + " " + response.message() + " | " + details);
+                }
                 throw new IOException("Shopify POST failed: " + response.code() + " " + response.message());
             }
             return mapper.readTree(response.body().string());

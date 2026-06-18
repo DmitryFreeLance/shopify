@@ -23,9 +23,12 @@ public class Config {
     public final long mediaGroupFinalizeSeconds;
     public final long productSyncSeconds;
     public final long productSyncDelayMs;
+    public final int productSyncBatchSize;
+    public final int productSyncPosOnlyBatchSize;
     public final long discountSyncSeconds;
     public final String discountTimezone;
     public final String sqlitePath;
+    public final long shopifyRateLimitCooldownSeconds;
 
     public final String kieApiKey;
     public final String kieModel;
@@ -75,9 +78,12 @@ public class Config {
         this.mediaGroupFinalizeSeconds = parseLong(getenv("MEDIA_GROUP_FINALIZE_SECONDS", "30"), 30);
         this.productSyncSeconds = parseLong(getenv("PRODUCT_SYNC_SECONDS", "180"), 180);
         this.productSyncDelayMs = parseLong(getenv("PRODUCT_SYNC_DELAY_MS", "200"), 200);
+        this.productSyncBatchSize = (int) parseLong(getenv("PRODUCT_SYNC_BATCH_SIZE", "20"), 20);
+        this.productSyncPosOnlyBatchSize = (int) parseLong(getenv("PRODUCT_SYNC_POS_ONLY_BATCH_SIZE", "5"), 5);
         this.discountSyncSeconds = parseLong(getenv("DISCOUNT_SYNC_SECONDS", "3600"), 3600);
         this.discountTimezone = getenv("DISCOUNT_TIMEZONE", "Europe/Belgrade");
         this.sqlitePath = getenv("SQLITE_PATH", "./data/bot.db");
+        this.shopifyRateLimitCooldownSeconds = parseLong(getenv("SHOPIFY_RATE_LIMIT_COOLDOWN_SECONDS", "90"), 90);
 
         this.kieApiKey = requireEnv("KIE_API_KEY");
         this.kieModel = getenv("KIE_MODEL", "gemini-3-flash");

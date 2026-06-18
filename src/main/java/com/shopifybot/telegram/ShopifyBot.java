@@ -64,7 +64,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -72,7 +71,9 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private static final Logger log = LoggerFactory.getLogger(ShopifyBot.class);
     private static final String ORDER_CONTACT_FOOTER = "Ako želite da naručite neku stvar, pošaljite fotografiju ove stvari @alinka809 ili @hlestovdmitry";
     private static final Pattern SHOPIFY_ID_FOOTER_PATTERN = Pattern.compile("(?is)(?:<br>\\s*)*ID:\\s*\\d+\\s*$");
-    private static final String META_SHOPIFY_ID_BACKFILL_OFFSET = "shopify:id_footer_backfill_offset";
+    private static final String META_SHOPIFY_SYNC_OFFSET = "shopify:sync_offset";
+    private static final String META_SHOPIFY_POS_ONLY_SYNC_OFFSET = "shopify:pos_only_sync_offset";
+    private static final String META_SHOPIFY_READ_COOLDOWN_UNTIL = "shopify:read_cooldown_until";
     private static final String CB_MENU = "MENU";
     private static final String CB_NOOP = "NOOP";
     private static final String CB_ADD_PRODUCT = "OPEN:ADD_PRODUCT";
@@ -131,7 +132,6 @@ public class ShopifyBot extends TelegramLongPollingBot {
 
     private final ExecutorService workers = Executors.newFixedThreadPool(2);
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-    private final AtomicBoolean shopifyIdBackfillRunning = new AtomicBoolean(false);
     private final Map<Long, AdminSession> sessions = new ConcurrentHashMap<>();
 
     public ShopifyBot(Config config, Database db, OkHttpClient http, TokenProvider tokenProvider) {
@@ -162,7 +162,6 @@ public class ShopifyBot extends TelegramLongPollingBot {
             if (!db.hasMetaKey(META_ARTICLE_ENABLED)) {
                 db.setMeta(META_ARTICLE_ENABLED, "false");
             }
-            scheduler.scheduleWithFixedDelay(() -> workers.submit(this::backfillShopifyProductIdFooterSafe), 30, 300, TimeUnit.SECONDS);
             log.info("Shop currency detected: {}", shopCurrency);
             log.info("Admins loaded: {}", config.adminUserIds.size());
             log.info("Collections ensured");
@@ -1878,15 +1877,17 @@ public class ShopifyBot extends TelegramLongPollingBot {
         db.deleteProductCard(card.productId);
     }
 
-    private void markTelegramCardAsProdato(ProductCard card) {
+    private boolean markTelegramCardAsProdato(ProductCard card) {
         if (card == null || "POS_ONLY".equals(card.status) || card.messageId <= 0) {
-            return;
+            return true;
         }
         try {
             editTelegramCaption(card.channelId, card.messageId, "PRODATO");
             db.updatePostText(card.channelId, card.messageId, "PRODATO");
+            return true;
         } catch (Exception e) {
             log.warn("Failed to put PRODATO caption for product {}", card.productId, e);
+            return false;
         }
     }
 
@@ -3162,84 +3163,6 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
     }
 
-    private void backfillShopifyProductIdFooterSafe() {
-        if (!shopifyIdBackfillRunning.compareAndSet(false, true)) {
-            return;
-        }
-        try {
-            backfillShopifyProductIdFooter();
-        } catch (Exception e) {
-            log.warn("Shopify ID footer backfill failed", e);
-        } finally {
-            shopifyIdBackfillRunning.set(false);
-        }
-    }
-
-    private void backfillShopifyProductIdFooter() {
-        int total = db.countCardsForSync();
-        if (total <= 0) {
-            db.setMeta(META_SHOPIFY_ID_BACKFILL_OFFSET, "0");
-            return;
-        }
-        int batchSize = 40;
-        int offset = 0;
-        String rawOffset = db.getMeta(META_SHOPIFY_ID_BACKFILL_OFFSET);
-        if (rawOffset != null && !rawOffset.isBlank()) {
-            try {
-                offset = Integer.parseInt(rawOffset.trim());
-            } catch (NumberFormatException ignored) {
-                offset = 0;
-            }
-        }
-        if (offset < 0 || offset >= total) {
-            offset = 0;
-        }
-
-        List<ProductCard> cards = db.listCardsForSync(batchSize, offset);
-        if (cards.isEmpty()) {
-            db.setMeta(META_SHOPIFY_ID_BACKFILL_OFFSET, "0");
-            return;
-        }
-
-        int updated = 0;
-        int nextOffset = offset;
-        boolean rateLimited = false;
-        for (ProductCard card : cards) {
-            try {
-                ShopifyProductSnapshot snap = shopify.getProductSnapshot(card.productId);
-                String desired = withShopifyProductIdFooterHtml(snap.bodyHtml, card.productId);
-                if (!desired.equals(snap.bodyHtml)) {
-                    String price = formatPriceForShopify(card.currentPriceRsd);
-                    String size = card.size == null ? "" : card.size;
-                    String barcode = card.article == null ? "" : card.article;
-                    shopify.updateProduct(card.productId, snap.variantId, snap.title, desired, price, size, barcode);
-                    updated++;
-                }
-                if (config.productSyncDelayMs > 0) {
-                    Thread.sleep(config.productSyncDelayMs);
-                }
-                nextOffset++;
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                return;
-            } catch (Exception e) {
-                if (contains429(e.getMessage())) {
-                    rateLimited = true;
-                    log.warn("Rate limited during Shopify ID footer backfill, pausing at offset {}", nextOffset);
-                    break;
-                }
-                log.warn("Failed to backfill Shopify ID footer for product {}", card.productId, e);
-                nextOffset++;
-            }
-        }
-        if (nextOffset >= total || cards.size() < batchSize) {
-            nextOffset = 0;
-        }
-        db.setMeta(META_SHOPIFY_ID_BACKFILL_OFFSET, String.valueOf(nextOffset));
-        log.info("Shopify ID footer backfill finished. updated={}, nextOffset={}, total={}, rateLimited={}",
-                updated, nextOffset, total, rateLimited);
-    }
-
     private void sleepQuietly(long ms) {
         try {
             Thread.sleep(ms);
@@ -4442,13 +4365,53 @@ public class ShopifyBot extends TelegramLongPollingBot {
     }
 
     private void syncDeletedProducts() {
-        List<ProductCard> cards = db.listCardsForSync();
-        if (cards.isEmpty()) return;
+        if (isShopifyReadCooldownActive()) {
+            return;
+        }
+        boolean rateLimited = syncDeletedProductsBatch(
+                META_SHOPIFY_SYNC_OFFSET,
+                Math.max(1, config.productSyncBatchSize),
+                db.countTelegramCardsForSync(),
+                (limit, offset) -> db.listTelegramCardsForSync(limit, offset),
+                "telegram"
+        );
+        if (!rateLimited && !isShopifyReadCooldownActive()) {
+            syncDeletedProductsBatch(
+                    META_SHOPIFY_POS_ONLY_SYNC_OFFSET,
+                    Math.max(1, config.productSyncPosOnlyBatchSize),
+                    db.countPosOnlyCardsForSync(),
+                    (limit, offset) -> db.listPosOnlyCardsForSync(limit, offset),
+                    "pos-only"
+            );
+        }
+    }
+
+    private boolean syncDeletedProductsBatch(String offsetMetaKey,
+                                             int batchSize,
+                                             int total,
+                                             ProductSyncBatchLoader loader,
+                                             String label) {
+        if (total <= 0) {
+            db.setMeta(offsetMetaKey, "0");
+            return false;
+        }
+        int offset = readCursorOffset(offsetMetaKey, total);
+        List<ProductCard> cards = loader.load(batchSize, offset);
+        if (cards.isEmpty()) {
+            db.setMeta(offsetMetaKey, "0");
+            return false;
+        }
+
+        int nextOffset = offset;
         for (ProductCard card : cards) {
             try {
                 ShopifyClient.ProductAvailability availability = shopify.getProductAvailability(card.productId);
                 if (availability == ShopifyClient.ProductAvailability.MISSING) {
-                    markTelegramCardAsProdato(card);
+                    if (!markTelegramCardAsProdato(card)) {
+                        log.warn("Product {} missing in Shopify, but Telegram caption update failed. Will retry later.", card.productId);
+                        nextOffset++;
+                        continue;
+                    }
                     db.markProductStatus(card.productId, "SOLD");
                     db.deleteProductCard(card.productId);
                     log.info("Product missing in Shopify, marked as PRODATO and cleaned references. productId={}", card.productId);
@@ -4459,7 +4422,11 @@ public class ShopifyBot extends TelegramLongPollingBot {
                     } catch (Exception e) {
                         log.warn("Failed to delete out-of-stock product {} in Shopify", card.productId, e);
                     }
-                    markTelegramCardAsProdato(card);
+                    if (!markTelegramCardAsProdato(card)) {
+                        log.warn("Product {} out of stock in Shopify, but Telegram caption update failed. Will retry later.", card.productId);
+                        nextOffset++;
+                        continue;
+                    }
                     db.markProductStatus(card.productId, "SOLD");
                     db.deleteProductCard(card.productId);
                     log.info("Product out of stock in Shopify, marked as PRODATO and cleaned references. productId={}", card.productId);
@@ -4467,16 +4434,66 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 if (config.productSyncDelayMs > 0) {
                     Thread.sleep(config.productSyncDelayMs);
                 }
+                nextOffset++;
             } catch (RateLimitException e) {
+                recordShopifyReadCooldown(e.getRetryAfterSeconds(), "deleted-sync/" + label);
+                db.setMeta(offsetMetaKey, String.valueOf(Math.min(nextOffset, Math.max(0, total - 1))));
                 log.warn("Rate limited by Shopify during sync (productId={}), pausing until next cycle", card.productId);
-                return;
+                return true;
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
-                return;
+                return true;
             } catch (Exception e) {
                 log.warn("Failed to sync product {} existence", card.productId, e);
+                nextOffset++;
             }
         }
+        if (nextOffset >= total || cards.size() < batchSize) {
+            nextOffset = 0;
+        }
+        db.setMeta(offsetMetaKey, String.valueOf(nextOffset));
+        return false;
+    }
+
+    private int readCursorOffset(String metaKey, int total) {
+        int offset = 0;
+        String raw = db.getMeta(metaKey);
+        if (raw != null && !raw.isBlank()) {
+            try {
+                offset = Integer.parseInt(raw.trim());
+            } catch (NumberFormatException ignored) {
+                offset = 0;
+            }
+        }
+        if (offset < 0 || offset >= total) {
+            return 0;
+        }
+        return offset;
+    }
+
+    private boolean isShopifyReadCooldownActive() {
+        String raw = db.getMeta(META_SHOPIFY_READ_COOLDOWN_UNTIL);
+        if (raw == null || raw.isBlank()) {
+            return false;
+        }
+        try {
+            long until = Long.parseLong(raw.trim());
+            return until > Instant.now().getEpochSecond();
+        } catch (NumberFormatException ignored) {
+            return false;
+        }
+    }
+
+    private void recordShopifyReadCooldown(long retryAfterSeconds, String source) {
+        long cooldown = retryAfterSeconds > 0 ? retryAfterSeconds : config.shopifyRateLimitCooldownSeconds;
+        long until = Instant.now().getEpochSecond() + Math.max(5, cooldown);
+        db.setMeta(META_SHOPIFY_READ_COOLDOWN_UNTIL, String.valueOf(until));
+        log.warn("Shopify read cooldown set for {} seconds after {}", Math.max(5, cooldown), source);
+    }
+
+    @FunctionalInterface
+    private interface ProductSyncBatchLoader {
+        List<ProductCard> load(int limit, int offset);
     }
 
     private void processSelectionByOrdinal(long chatId, AdminSession session, int ordinal) {

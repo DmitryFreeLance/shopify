@@ -655,6 +655,24 @@ public class Database {
         return listProductsByStatuses(5000, 0, "status='ACTIVE'");
     }
 
+    public List<ProductCard> listTelegramCardsForSync(int limit, int offset) {
+        return listProductsByStatuses(limit, offset,
+                "status IN ('ACTIVE','RESERVED') AND message_id > 0 AND channel_id IS NOT NULL AND channel_id <> ''",
+                "updated_at DESC, created_at DESC");
+    }
+
+    public int countTelegramCardsForSync() {
+        return countProductsByStatuses("status IN ('ACTIVE','RESERVED') AND message_id > 0 AND channel_id IS NOT NULL AND channel_id <> ''");
+    }
+
+    public List<ProductCard> listPosOnlyCardsForSync(int limit, int offset) {
+        return listProductsByStatuses(limit, offset, "status='POS_ONLY'", "updated_at DESC, created_at DESC");
+    }
+
+    public int countPosOnlyCardsForSync() {
+        return countProductsByStatuses("status='POS_ONLY'");
+    }
+
     public List<ProductCard> listCardsForSync() {
         return listProductsByStatuses(10000, 0, "status IN ('ACTIVE','RESERVED','POS_ONLY')");
     }
@@ -664,21 +682,18 @@ public class Database {
     }
 
     public int countCardsForSync() {
-        String sql = "SELECT COUNT(*) FROM product_cards WHERE status IN ('ACTIVE','RESERVED','POS_ONLY')";
-        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() ? rs.getInt(1) : 0;
-            }
-        } catch (SQLException e) {
-            throw new RuntimeException("DB countCardsForSync failed", e);
-        }
+        return countProductsByStatuses("status IN ('ACTIVE','RESERVED','POS_ONLY')");
     }
 
     private List<ProductCard> listProductsByStatuses(int limit, int offset, String whereClause) {
+        return listProductsByStatuses(limit, offset, whereClause, "created_at ASC");
+    }
+
+    private List<ProductCard> listProductsByStatuses(int limit, int offset, String whereClause, String orderBy) {
         List<ProductCard> items = new ArrayList<>();
         String sql = "SELECT product_id, channel_id, message_id, media_group_id, title, size, description, article, " +
                 "base_price_rsd, current_price_rsd, discount_percent, fixed_price_rsd, status, created_at, updated_at " +
-                "FROM product_cards WHERE " + whereClause + " ORDER BY created_at ASC LIMIT ? OFFSET ?";
+                "FROM product_cards WHERE " + whereClause + " ORDER BY " + orderBy + " LIMIT ? OFFSET ?";
         try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setInt(1, limit);
             ps.setInt(2, offset);
@@ -691,6 +706,17 @@ public class Database {
             throw new RuntimeException("DB listProductsByStatuses failed", e);
         }
         return items;
+    }
+
+    private int countProductsByStatuses(String whereClause) {
+        String sql = "SELECT COUNT(*) FROM product_cards WHERE " + whereClause;
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getInt(1) : 0;
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("DB countProductsByStatuses failed", e);
+        }
     }
 
     public ProductCard findVisibleProductByOrdinal(int ordinal) {

@@ -3554,7 +3554,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 .toLocalDate();
         LocalDate ageStart = createdAtDate;
         int sundaySteps = countSundaySteps(ageStart, today);
-        int discount = sundaySteps <= 0 ? 0 : sundaySteps == 1 ? 15 : sundaySteps == 2 ? 30 : 50;
+        int baseDiscount = sundaySteps <= 0 ? 0 : sundaySteps == 1 ? 15 : sundaySteps == 2 ? 30 : 50;
+        int discount = baseDiscount;
         Double fixed = null;
 
         if (isFinalDiscountWeek(today)) {
@@ -3564,23 +3565,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
             } else if (dow >= 6) {
                 fixed = 350.0;
             } else {
-                if (sundaySteps >= 3) {
-                    discount = 50;
-                } else if (sundaySteps == 2) {
-                    discount = 30;
-                } else if (sundaySteps == 1) {
-                    if (dow == 1) {
-                        discount = 20;
-                    } else if (dow == 2) {
-                        discount = 30;
-                    } else if (dow == 3) {
-                        discount = 40;
-                    } else {
-                        discount = 50;
-                    }
-                } else {
-                    discount = 0;
-                }
+                discount = evolveFinalWeekDiscount(baseDiscount, dow);
             }
         }
 
@@ -3609,9 +3594,37 @@ public class ShopifyBot extends TelegramLongPollingBot {
         return Math.max(0, (int) Math.round((1.0 - (fixedPrice / basePrice)) * 100.0));
     }
 
+    private int evolveFinalWeekDiscount(int baseDiscount, int dayOfWeek) {
+        if (baseDiscount >= 50) {
+            return 50;
+        }
+        if (baseDiscount >= 30) {
+            if (dayOfWeek >= 3) {
+                return 40;
+            }
+            return 30;
+        }
+        if (baseDiscount >= 15) {
+            if (dayOfWeek == 1) {
+                return 20;
+            }
+            if (dayOfWeek == 2) {
+                return 30;
+            }
+            if (dayOfWeek == 3) {
+                return 40;
+            }
+            if (dayOfWeek == 4) {
+                return 50;
+            }
+            return 15;
+        }
+        return 0;
+    }
+
     private String buildDiscountSyncMarker(LocalDate today) {
         Integer cycleDay = getDiscountCycleDay(today);
-        return today + "|cycleDay=" + (cycleDay == null ? 0 : cycleDay) + "|final=" + isFinalDiscountWeek(today);
+        return today + "|cycleDay=" + (cycleDay == null ? 0 : cycleDay) + "|final=" + isFinalDiscountWeek(today) + "|v2";
     }
 
     private static class PublishResult {

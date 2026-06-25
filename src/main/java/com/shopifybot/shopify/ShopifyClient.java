@@ -252,6 +252,9 @@ public class ShopifyClient {
                 .put(RequestBody.create(mapper.writeValueAsBytes(root), JSON))
                 .build();
         try (Response response = http.newCall(request).execute()) {
+            if (response.code() == 429) {
+                throw rateLimitException("Shopify update rate limited", response);
+            }
             if (!response.isSuccessful()) {
                 throw new IOException("Shopify update failed: " + response.code() + " " + response.message());
             }
@@ -504,6 +507,9 @@ public class ShopifyClient {
                 .get()
                 .build();
         try (Response response = http.newCall(request).execute()) {
+            if (response.code() == 429) {
+                throw rateLimitException("Shopify GET rate limited", response);
+            }
             if (!response.isSuccessful()) {
                 throw new IOException("Shopify GET failed: " + response.code() + " " + response.message());
             }
@@ -518,6 +524,9 @@ public class ShopifyClient {
                 .post(RequestBody.create(mapper.writeValueAsBytes(body), JSON))
                 .build();
         try (Response response = http.newCall(request).execute()) {
+            if (response.code() == 429) {
+                throw rateLimitException("Shopify POST rate limited", response);
+            }
             if (!response.isSuccessful()) {
                 String responseBody = response.body() == null ? "" : response.body().string();
                 String details = responseBody == null ? "" : responseBody.trim();
@@ -531,6 +540,19 @@ public class ShopifyClient {
             }
             return mapper.readTree(response.body().string());
         }
+    }
+
+    private RateLimitException rateLimitException(String message, Response response) {
+        String retryAfter = response.header("Retry-After", "");
+        long retryAfterSeconds = 0;
+        if (retryAfter != null && !retryAfter.isBlank()) {
+            try {
+                retryAfterSeconds = Long.parseLong(retryAfter.trim());
+            } catch (NumberFormatException ignored) {
+                retryAfterSeconds = 0;
+            }
+        }
+        return new RateLimitException(message, retryAfterSeconds);
     }
 
     private JsonNode graphQL(String query) throws IOException {

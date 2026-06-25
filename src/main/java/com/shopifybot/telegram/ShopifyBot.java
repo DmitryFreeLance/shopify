@@ -64,6 +64,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -134,6 +135,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
 
     private final ExecutorService workers = Executors.newFixedThreadPool(2);
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+    private final AtomicBoolean discountSyncRunning = new AtomicBoolean(false);
+    private final AtomicBoolean discountSyncRetryScheduled = new AtomicBoolean(false);
     private final Map<Long, AdminSession> sessions = new ConcurrentHashMap<>();
 
     public ShopifyBot(Config config, Database db, OkHttpClient http, TokenProvider tokenProvider) {
@@ -1930,6 +1933,15 @@ public class ShopifyBot extends TelegramLongPollingBot {
     }
 
     private void syncCardState(ProductCard card, String status, int discountPercent, Double fixedPriceRsd, double currentPriceRsd) throws IOException {
+        syncCardState(card, status, discountPercent, fixedPriceRsd, currentPriceRsd, true);
+    }
+
+    private void syncCardState(ProductCard card,
+                               String status,
+                               int discountPercent,
+                               Double fixedPriceRsd,
+                               double currentPriceRsd,
+                               boolean syncSaleCollection) throws IOException {
         ShopifyProductSnapshot snapshot = shopify.getProductSnapshot(card.productId);
         String shopifyTitle = "RESERVED".equals(status) ? ("REZERVISANO | " + card.title) : card.title;
         String captionCore = buildProductCaption(card.title, card.size, card.basePriceRsd, currentPriceRsd, card.article, discountPercent, fixedPriceRsd, status);
@@ -1945,7 +1957,9 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 card.size,
                 card.article
         );
-        syncSaleCollection(card.productId, discountPercent > 0 || fixedPriceRsd != null);
+        if (syncSaleCollection) {
+            syncSaleCollection(card.productId, discountPercent > 0 || fixedPriceRsd != null);
+        }
         try {
             editTelegramCaption(card.channelId, card.messageId, telegramCaption);
         } catch (TelegramApiException e) {
@@ -3436,10 +3450,16 @@ public class ShopifyBot extends TelegramLongPollingBot {
     }
 
     private void syncDiscountsSafe() {
+        if (!discountSyncRunning.compareAndSet(false, true)) {
+            log.info("Discount sync skipped because another run is still in progress");
+            return;
+        }
         try {
             syncDiscounts();
         } catch (Exception e) {
             log.warn("Discount sync failed", e);
+        } finally {
+            discountSyncRunning.set(false);
         }
     }
 
@@ -3605,6 +3625,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
             return;
         }
 
+        boolean retryNeeded = false;
         for (ProductCard card : cards) {
             try {
                 DiscountTarget target = calculateDiscountTarget(card, today);
@@ -3617,10 +3638,28 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 if (samePrice && sameDiscount && sameFixed) {
                     continue;
                 }
-                syncCardState(card, card.status, target.discountPercent, target.fixedPriceRsd, target.currentPriceRsd);
+                boolean shouldBeInSale = target.discountPercent > 0 || target.fixedPriceRsd != null;
+                boolean alreadyInSale = card.discountPercent > 0 || card.fixedPriceRsd != null;
+                boolean syncSaleCollection = shouldBeInSale != alreadyInSale;
+                syncCardState(card, card.status, target.discountPercent, target.fixedPriceRsd, target.currentPriceRsd, syncSaleCollection);
+                sleepQuietly(Math.max(config.productSyncDelayMs, 1200));
+            } catch (RateLimitException e) {
+                retryNeeded = true;
+                recordShopifyReadCooldown(e.getRetryAfterSeconds(), "discount-sync");
+                log.warn("Discount sync rate limited by Shopify on product {}, will retry later", card.productId);
+                break;
             } catch (Exception e) {
                 log.warn("Failed to apply discount to product {}", card.productId, e);
+                if (contains429(e.getMessage())) {
+                    retryNeeded = true;
+                    scheduleDiscountRetrySoon("429-during-discount-sync");
+                    break;
+                }
             }
+        }
+        if (retryNeeded) {
+            scheduleDiscountRetrySoon("discount-sync-incomplete");
+            return;
         }
         db.setMeta(key, syncMarker);
     }
@@ -3708,6 +3747,18 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private String buildDiscountSyncMarker(LocalDate today) {
         Integer cycleDay = getDiscountCycleDay(today);
         return today + "|cycleDay=" + (cycleDay == null ? 0 : cycleDay) + "|final=" + isFinalDiscountWeek(today) + "|v2";
+    }
+
+    private void scheduleDiscountRetrySoon(String reason) {
+        if (!discountSyncRetryScheduled.compareAndSet(false, true)) {
+            return;
+        }
+        long delaySeconds = Math.max(60, config.shopifyRateLimitCooldownSeconds);
+        scheduler.schedule(() -> {
+            discountSyncRetryScheduled.set(false);
+            log.info("Retrying discount sync after delay: {}", reason);
+            syncDiscountsSafe();
+        }, delaySeconds, TimeUnit.SECONDS);
     }
 
     private static class PublishResult {

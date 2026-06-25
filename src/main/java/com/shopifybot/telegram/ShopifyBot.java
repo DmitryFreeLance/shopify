@@ -361,6 +361,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         if (CB_DISCOUNTS_ENABLE.equals(data)) {
             db.setMeta(META_DISCOUNT_ENABLED, "true");
             db.setMeta("discount:last_sync_date", "");
+            triggerDiscountSyncNow("enabled-by-admin");
             sendDiscountsDashboard(chatId, "▶️ Прогрессивные скидки включены.");
             answerCallback(callback, "Скидки включены");
             return;
@@ -384,7 +385,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
             db.setMeta(META_DISCOUNT_RESET_START, today);
             db.setMeta("discount:last_sync_date", "");
             log.warn("Discount cycle reset by admin {}. New start date={}", user.getId(), today);
-            sendDiscountsDashboard(chatId, "🔁 Цикл скидок сброшен.\nНовая дата старта цикла: " + today);
+            triggerDiscountSyncNow("reset-by-admin");
+            sendDiscountsDashboard(chatId, "🔁 Цикл скидок сброшен.\nНовая дата старта цикла: " + today + "\nПересчет скидок запущен.");
             answerCallback(callback, "Цикл сброшен");
             return;
         }
@@ -3569,8 +3571,20 @@ public class ShopifyBot extends TelegramLongPollingBot {
         db.setMeta(META_DISCOUNT_RESET_START, parsed.toString());
         db.setMeta("discount:last_sync_date", "");
         log.warn("Discount cycle start date changed manually by admin {}. New start date={}", session.userId, parsed);
+        triggerDiscountSyncNow("date-set-manually");
         resetSession(session);
-        sendDiscountsDashboard(chatId, "✅ Дата старта цикла установлена: " + parsed);
+        sendDiscountsDashboard(chatId, "✅ Дата старта цикла установлена: " + parsed + "\nПересчет скидок запущен.");
+    }
+
+    private void triggerDiscountSyncNow(String reason) {
+        try {
+            workers.submit(() -> {
+                log.info("Immediate discount sync requested: {}", reason);
+                syncDiscountsSafe();
+            });
+        } catch (Exception e) {
+            log.warn("Failed to trigger immediate discount sync: {}", reason, e);
+        }
     }
 
     private void syncDiscounts() {

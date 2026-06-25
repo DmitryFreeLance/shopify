@@ -94,6 +94,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private static final String CB_DISCOUNTS_DISABLE = "DISCOUNT:DISABLE";
     private static final String CB_DISCOUNTS_ENABLE = "DISCOUNT:ENABLE";
     private static final String CB_DISCOUNTS_RESET = "DISCOUNT:RESET";
+    private static final String CB_DISCOUNTS_RESET_CONFIRM = "DISCOUNT:RESET_CONFIRM";
+    private static final String CB_DISCOUNTS_SET_DATE = "DISCOUNT:SET_DATE";
     private static final String CB_MANUAL_DISCOUNT = "OPEN:MANUAL_DISCOUNT";
     private static final String CB_DONE_PHOTOS = "FLOW:DONE_PHOTOS";
     private static final String CB_BACK_TO_PHOTOS = "FLOW:BACK_TO_PHOTOS";
@@ -364,11 +366,40 @@ public class ShopifyBot extends TelegramLongPollingBot {
             return;
         }
         if (CB_DISCOUNTS_RESET.equals(data)) {
+            LocalDate currentStart = getDiscountResetStartDate();
+            String startLabel = currentStart == null ? "не задана" : currentStart.toString();
+            sendText(chatId,
+                    "Подтвердите сброс цикла скидок.\n" +
+                            "Текущая дата старта цикла: " + startLabel + "\n" +
+                            "После подтверждения бот запишет сегодняшнюю дату и начнет цикл заново с дня 1.",
+                    inlineSingleColumn(
+                            button("✅ Подтвердить сброс", CB_DISCOUNTS_RESET_CONFIRM),
+                            button("⬅ Назад к скидкам", CB_DISCOUNTS)
+                    ));
+            answerCallback(callback, "Нужно подтверждение");
+            return;
+        }
+        if (CB_DISCOUNTS_RESET_CONFIRM.equals(data)) {
             String today = todayInDiscountZone().toString();
             db.setMeta(META_DISCOUNT_RESET_START, today);
             db.setMeta("discount:last_sync_date", "");
-            sendDiscountsDashboard(chatId, "🔁 Цикл скидок сброшен.\nНовые товары пойдут с дня 1 (0%).");
+            log.warn("Discount cycle reset by admin {}. New start date={}", user.getId(), today);
+            sendDiscountsDashboard(chatId, "🔁 Цикл скидок сброшен.\nНовая дата старта цикла: " + today);
             answerCallback(callback, "Цикл сброшен");
+            return;
+        }
+        if (CB_DISCOUNTS_SET_DATE.equals(data)) {
+            session.state = AdminState.DISCOUNT_CYCLE_DATE_INPUT;
+            LocalDate currentStart = getDiscountResetStartDate();
+            String startLabel = currentStart == null ? "не задана" : currentStart.toString();
+            sendText(chatId,
+                    "Введите дату старта цикла скидок.\n" +
+                            "Текущая дата: " + startLabel + "\n" +
+                            "Формат: `2026-06-01` или `01.06.2026`",
+                    inlineSingleColumn(
+                            button("Отменить", CB_CANCEL_FLOW)
+                    ));
+            answerCallback(callback, "");
             return;
         }
         if (CB_MANUAL_DISCOUNT.equals(data)) {
@@ -898,6 +929,11 @@ public class ShopifyBot extends TelegramLongPollingBot {
 
         if (session.state == AdminState.SCHEDULE_SLOT_INPUT) {
             addPublicationSlotFromInput(chatId, session, text);
+            return;
+        }
+
+        if (session.state == AdminState.DISCOUNT_CYCLE_DATE_INPUT) {
+            applyDiscountCycleStartDate(chatId, session, text);
             return;
         }
 
@@ -2029,12 +2065,14 @@ public class ShopifyBot extends TelegramLongPollingBot {
         String phase = describeDiscountStage(today);
         String dayInfo = describeDiscountDay(today);
         String dateLabel = today.format(DateTimeFormatter.ofPattern("dd.MM.yyyy"));
+        LocalDate cycleStart = getDiscountResetStartDate();
         List<ProductCard> cards = db.listVisibleProducts(5000, 0);
 
         StringBuilder text = new StringBuilder();
         text.append("🧾 Скидки\n");
         text.append("Статус: ").append(enabled ? "включены ✅" : "отключены ⏸").append("\n");
         text.append("Сегодня: ").append(dateLabel).append("\n");
+        text.append("Дата старта цикла: ").append(cycleStart == null ? "не задана" : cycleStart.toString()).append("\n");
         text.append("День цикла: ").append(dayInfo).append("\n");
         text.append("Текущий этап: ").append(phase).append("\n");
         text.append("Скидочный день недели: воскресенье.\n");
@@ -2106,11 +2144,14 @@ public class ShopifyBot extends TelegramLongPollingBot {
         InlineKeyboardButton toggle = enabled
                 ? button("⏸ Отключить скидки", CB_DISCOUNTS_DISABLE)
                 : button("▶️ Включить скидки", CB_DISCOUNTS_ENABLE);
-        sendText(chatId, text.toString(), inlineSingleColumn(
-                toggle,
-                button("🔁 Сбросить цикл", CB_DISCOUNTS_RESET),
-                button("🏷 Скидка на товар", CB_MANUAL_DISCOUNT),
-                button("⬅ Назад в меню", CB_MENU)
+        sendText(chatId, text.toString(), inlineRows(
+                List.of(toggle),
+                List.of(
+                        button("📅 Установить дату цикла", CB_DISCOUNTS_SET_DATE),
+                        button("🔁 Сбросить цикл", CB_DISCOUNTS_RESET)
+                ),
+                List.of(button("🏷 Скидка на товар", CB_MANUAL_DISCOUNT)),
+                List.of(button("⬅ Назад в меню", CB_MENU))
         ));
     }
 
@@ -3504,6 +3545,34 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
     }
 
+    private void applyDiscountCycleStartDate(long chatId, AdminSession session, String rawText) {
+        String value = rawText == null ? "" : rawText.trim();
+        LocalDate parsed = null;
+        if (!value.isBlank()) {
+            try {
+                parsed = LocalDate.parse(value);
+            } catch (DateTimeParseException ignored) {
+            }
+            if (parsed == null) {
+                try {
+                    parsed = LocalDate.parse(value, DateTimeFormatter.ofPattern("dd.MM.yyyy"));
+                } catch (DateTimeParseException ignored) {
+                }
+            }
+        }
+        if (parsed == null) {
+            sendText(chatId,
+                    "Не удалось распознать дату.\nВведите в формате `2026-06-01` или `01.06.2026`.",
+                    inlineSingleColumn(button("Отменить", CB_CANCEL_FLOW)));
+            return;
+        }
+        db.setMeta(META_DISCOUNT_RESET_START, parsed.toString());
+        db.setMeta("discount:last_sync_date", "");
+        log.warn("Discount cycle start date changed manually by admin {}. New start date={}", session.userId, parsed);
+        resetSession(session);
+        sendDiscountsDashboard(chatId, "✅ Дата старта цикла установлена: " + parsed);
+    }
+
     private void syncDiscounts() {
         if (!isDiscountsEnabled()) {
             return;
@@ -3669,6 +3738,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         DRAFT_EDIT_ARTICLE_INPUT,
         DRAFT_PUBLISH_CHOICE,
         SCHEDULE_SLOT_INPUT,
+        DISCOUNT_CYCLE_DATE_INPUT,
         RESERVE_SELECT,
         UNRESERVE_SELECT,
         SOLD_SELECT,

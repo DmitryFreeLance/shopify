@@ -3615,27 +3615,22 @@ public class ShopifyBot extends TelegramLongPollingBot {
         String key = "discount:last_sync_date";
         String syncMarker = buildDiscountSyncMarker(today);
         String lastDate = db.getMeta(key);
-        if (syncMarker.equals(lastDate)) {
+        List<ProductCard> cards = db.listProductsForDiscount();
+        if (syncMarker.equals(lastDate) && !hasDiscountDrift(cards, today)) {
             return;
         }
-
-        List<ProductCard> cards = db.listProductsForDiscount();
         if (cards.isEmpty()) {
             db.setMeta(key, syncMarker);
             return;
         }
 
         boolean retryNeeded = false;
+        boolean transientFailure = false;
         for (ProductCard card : cards) {
             try {
                 DiscountTarget target = calculateDiscountTarget(card, today);
                 if (target == null) continue;
-                boolean samePrice = Math.abs(card.currentPriceRsd - target.currentPriceRsd) < 0.00001;
-                boolean sameDiscount = card.discountPercent == target.discountPercent;
-                boolean sameFixed = (card.fixedPriceRsd == null && target.fixedPriceRsd == null) ||
-                        (card.fixedPriceRsd != null && target.fixedPriceRsd != null &&
-                                Math.abs(card.fixedPriceRsd - target.fixedPriceRsd) < 0.00001);
-                if (samePrice && sameDiscount && sameFixed) {
+                if (!requiresDiscountSync(card, target)) {
                     continue;
                 }
                 boolean shouldBeInSale = target.discountPercent > 0 || target.fixedPriceRsd != null;
@@ -3650,6 +3645,10 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 break;
             } catch (Exception e) {
                 log.warn("Failed to apply discount to product {}", card.productId, e);
+                if (isTransientDiscountSyncFailure(e)) {
+                    transientFailure = true;
+                    break;
+                }
                 if (contains429(e.getMessage())) {
                     retryNeeded = true;
                     scheduleDiscountRetrySoon("429-during-discount-sync");
@@ -3657,11 +3656,21 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 }
             }
         }
-        if (retryNeeded) {
+        if (retryNeeded || transientFailure) {
             scheduleDiscountRetrySoon("discount-sync-incomplete");
             return;
         }
         db.setMeta(key, syncMarker);
+    }
+
+    private boolean hasDiscountDrift(List<ProductCard> cards, LocalDate today) {
+        for (ProductCard card : cards) {
+            DiscountTarget target = calculateDiscountTarget(card, today);
+            if (target != null && requiresDiscountSync(card, target)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private DiscountTarget calculateDiscountTarget(ProductCard card, LocalDate today) {
@@ -3701,6 +3710,15 @@ public class ShopifyBot extends TelegramLongPollingBot {
             effectiveDiscount = discount;
         }
         return new DiscountTarget(effectiveDiscount, price, fixed);
+    }
+
+    private boolean requiresDiscountSync(ProductCard card, DiscountTarget target) {
+        boolean samePrice = Math.abs(card.currentPriceRsd - target.currentPriceRsd) < 0.00001;
+        boolean sameDiscount = card.discountPercent == target.discountPercent;
+        boolean sameFixed = (card.fixedPriceRsd == null && target.fixedPriceRsd == null) ||
+                (card.fixedPriceRsd != null && target.fixedPriceRsd != null &&
+                        Math.abs(card.fixedPriceRsd - target.fixedPriceRsd) < 0.00001);
+        return !(samePrice && sameDiscount && sameFixed);
     }
 
     private int countSundaySteps(LocalDate start, LocalDate today) {
@@ -3759,6 +3777,30 @@ public class ShopifyBot extends TelegramLongPollingBot {
             log.info("Retrying discount sync after delay: {}", reason);
             syncDiscountsSafe();
         }, delaySeconds, TimeUnit.SECONDS);
+    }
+
+    private boolean isTransientDiscountSyncFailure(Throwable error) {
+        Throwable current = error;
+        while (current != null) {
+            if (current instanceof java.net.UnknownHostException ||
+                    current instanceof java.net.SocketTimeoutException ||
+                    current instanceof java.net.ConnectException ||
+                    current instanceof javax.net.ssl.SSLException ||
+                    current instanceof RateLimitException) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        String message = error.getMessage();
+        if (message == null) {
+            return false;
+        }
+        String normalized = message.toLowerCase(Locale.ROOT);
+        return normalized.contains("temporary failure in name resolution") ||
+                normalized.contains("connection reset") ||
+                normalized.contains("connect timed out") ||
+                normalized.contains("read timed out") ||
+                normalized.contains("failed to edit telegram caption");
     }
 
     private static class PublishResult {

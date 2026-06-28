@@ -2500,6 +2500,10 @@ public class ShopifyBot extends TelegramLongPollingBot {
                     "  \"price_rsd\": \"number only\"" +
                     (articleEnabled ? ",\n  \"article\": \"8 digits or empty\"\n" : "\n") +
                     "}\n" +
+                    "Priority rule for gender: determine gender by the color of the price tag.\n" +
+                    "If the price tag is brown, use gender=muški.\n" +
+                    "If the price tag is white, use gender=ženski.\n" +
+                    "This price tag color rule has higher priority than the clothing shape or brand.\n" +
                     "Rules: if item is top/crop top/bralette/leggings/skirt/dress/bikini, use gender=ženski.\n" +
                     "No markdown, no extra text.";
         }

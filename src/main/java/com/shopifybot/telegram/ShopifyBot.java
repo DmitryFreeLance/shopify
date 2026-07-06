@@ -1927,6 +1927,10 @@ public class ShopifyBot extends TelegramLongPollingBot {
             db.updatePostText(card.channelId, card.messageId, "PRODATO");
             return true;
         } catch (Exception e) {
+            if (isTelegramMessageMissingError(e)) {
+                log.warn("Telegram message already missing for product {}, treating PRODATO caption as already gone", card.productId);
+                return true;
+            }
             log.warn("Failed to put PRODATO caption for product {}", card.productId, e);
             return false;
         }
@@ -1942,7 +1946,16 @@ public class ShopifyBot extends TelegramLongPollingBot {
                                Double fixedPriceRsd,
                                double currentPriceRsd,
                                boolean syncSaleCollection) throws IOException {
-        ShopifyProductSnapshot snapshot = shopify.getProductSnapshot(card.productId);
+        ShopifyProductSnapshot snapshot;
+        try {
+            snapshot = shopify.getProductSnapshot(card.productId);
+        } catch (IOException e) {
+            if (isShopifyProductMissingError(e)) {
+                handleMissingShopifyProduct(card, "sync-card-state");
+                return;
+            }
+            throw e;
+        }
         String shopifyTitle = "RESERVED".equals(status) ? ("REZERVISANO | " + card.title) : card.title;
         String captionCore = buildProductCaption(card.title, card.size, card.basePriceRsd, currentPriceRsd, card.article, discountPercent, fixedPriceRsd, status);
         String telegramCaption = buildTelegramPostCaption(captionCore);
@@ -1960,15 +1973,23 @@ public class ShopifyBot extends TelegramLongPollingBot {
         if (syncSaleCollection) {
             syncSaleCollection(card.productId, discountPercent > 0 || fixedPriceRsd != null);
         }
+        boolean shouldStoreCaption = true;
         try {
             editTelegramCaption(card.channelId, card.messageId, telegramCaption);
         } catch (TelegramApiException e) {
             String msg = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
             if (!msg.contains("message is not modified")) {
-                throw new IOException("Failed to edit Telegram caption", e);
+                if (isTelegramMessageMissingError(e)) {
+                    shouldStoreCaption = false;
+                    log.warn("Telegram message missing for product {}, Shopify price updated; saving DB pricing without caption edit", card.productId);
+                } else {
+                    throw new IOException("Failed to edit Telegram caption", e);
+                }
             }
         }
-        db.updatePostText(card.channelId, card.messageId, telegramCaption);
+        if (shouldStoreCaption) {
+            db.updatePostText(card.channelId, card.messageId, telegramCaption);
+        }
         db.updateProductCardPricing(card.productId, currentPriceRsd, discountPercent, fixedPriceRsd);
         db.updateProductCardStatus(card.productId, status);
     }
@@ -1983,8 +2004,24 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 shopify.removeProductFromCollection(saleCollectionId, productId);
             }
         } catch (Exception e) {
+            if (isAlreadySyncedSaleCollectionError(e)) {
+                return;
+            }
             log.warn("Failed to sync Sniženje collection for product {}", productId, e);
         }
+    }
+
+    private void handleMissingShopifyProduct(ProductCard card, String source) {
+        if (card == null) {
+            return;
+        }
+        if (!markTelegramCardAsProdato(card)) {
+            log.warn("Product {} missing in Shopify during {}, but Telegram caption update failed. Will retry later.", card.productId, source);
+            return;
+        }
+        db.markProductStatus(card.productId, "SOLD");
+        db.deleteProductCard(card.productId);
+        log.info("Product missing in Shopify during {}, marked as PRODATO and cleaned references. productId={}", source, card.productId);
     }
 
     private void editTelegramCaption(String channelId, long messageId, String caption) throws TelegramApiException {
@@ -3805,6 +3842,50 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 normalized.contains("connect timed out") ||
                 normalized.contains("read timed out") ||
                 normalized.contains("failed to edit telegram caption");
+    }
+
+    private boolean isShopifyProductMissingError(Throwable error) {
+        Throwable current = error;
+        while (current != null) {
+            String message = current.getMessage();
+            if (message != null && message.toLowerCase(Locale.ROOT).contains("shopify get failed: 404")) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
+    private boolean isTelegramMessageMissingError(Throwable error) {
+        Throwable current = error;
+        while (current != null) {
+            String message = current.getMessage();
+            if (message != null) {
+                String normalized = message.toLowerCase(Locale.ROOT);
+                if (normalized.contains("message to edit not found") ||
+                        normalized.contains("message_id_invalid") ||
+                        normalized.contains("message to delete not found")) {
+                    return true;
+                }
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
+    private boolean isAlreadySyncedSaleCollectionError(Throwable error) {
+        Throwable current = error;
+        while (current != null) {
+            String message = current.getMessage();
+            if (message != null) {
+                String normalized = message.toLowerCase(Locale.ROOT);
+                if (normalized.contains("already exists in this collection")) {
+                    return true;
+                }
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     private static class PublishResult {

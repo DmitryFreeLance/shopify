@@ -3350,7 +3350,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         if (!digits.matches("\\d{8}")) {
             return null;
         }
-        return digits;
+        return String.format(Locale.US, "%010d", Long.parseLong(digits));
     }
 
     private String articleFromShopifyBarcode(String digits) {
@@ -3359,6 +3359,9 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
         if (digits.matches("\\d{8}")) {
             return digits;
+        }
+        if (digits.matches("\\d{10}")) {
+            return digits.substring(2);
         }
         if (!digits.matches("\\d{13}") || !digits.startsWith(LEGACY_SHOPIFY_BARCODE_PREFIX)) {
             return null;

@@ -76,6 +76,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private static final String META_SHOPIFY_POS_ONLY_SYNC_OFFSET = "shopify:pos_only_sync_offset";
     private static final String META_SHOPIFY_BARCODE_SYNC_OFFSET = "shopify:barcode_sync_offset";
     private static final String META_SHOPIFY_READ_COOLDOWN_UNTIL = "shopify:read_cooldown_until";
+    private static final String POS_BARCODE_PREFIX = "27";
     private static final String LEGACY_SHOPIFY_BARCODE_PREFIX = "2000";
     private static final String CB_MENU = "MENU";
     private static final String CB_NOOP = "NOOP";
@@ -3350,7 +3351,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         if (!digits.matches("\\d{8}")) {
             return null;
         }
-        return String.format(Locale.US, "%010d", Long.parseLong(digits));
+        return POS_BARCODE_PREFIX + digits;
     }
 
     private String articleFromShopifyBarcode(String digits) {
@@ -3359,6 +3360,9 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
         if (digits.matches("\\d{8}")) {
             return digits;
+        }
+        if (digits.matches("\\d{10}") && digits.startsWith(POS_BARCODE_PREFIX)) {
+            return digits.substring(POS_BARCODE_PREFIX.length());
         }
         if (digits.matches("\\d{10}")) {
             return digits.substring(2);

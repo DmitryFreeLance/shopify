@@ -76,7 +76,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private static final String META_SHOPIFY_POS_ONLY_SYNC_OFFSET = "shopify:pos_only_sync_offset";
     private static final String META_SHOPIFY_BARCODE_SYNC_OFFSET = "shopify:barcode_sync_offset";
     private static final String META_SHOPIFY_READ_COOLDOWN_UNTIL = "shopify:read_cooldown_until";
-    private static final String POS_BARCODE_PREFIX = "27";
+    private static final String POS_BARCODE_PREFIX = "99";
     private static final String LEGACY_SHOPIFY_BARCODE_PREFIX = "2000";
     private static final String CB_MENU = "MENU";
     private static final String CB_NOOP = "NOOP";
@@ -2481,8 +2481,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
                     if (!isArticleEnabled()) {
                         draft.article = generateInternalArticle();
                     } else {
-                        String digits = draft.article == null ? "" : draft.article.replaceAll("\\D", "");
-                        draft.article = digits.matches("\\d{8}") ? digits : generateInternalArticle();
+                        String article = normalizeArticleCandidate(draft.article);
+                        draft.article = article.matches("\\d{8}") ? article : generateInternalArticle();
                     }
                     if (draft.priceRsd <= 0) {
                         log.warn("AI draft has invalid price for batch item {}", gi + 1);
@@ -2549,6 +2549,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
                     "If the price tag is brown, use gender=muški.\n" +
                     "If the price tag is white, use gender=ženski.\n" +
                     "This price tag color rule has higher priority than the clothing shape or brand.\n" +
+                    "Article rule: if the visible barcode text has 10 digits, ignore the first 2 digits and return the last 8 digits as article.\n" +
+                    "Never return the first 8 digits of a 10-digit barcode.\n" +
                     "Rules: if item is top/crop top/bralette/leggings/skirt/dress/bikini, use gender=ženski.\n" +
                     "No markdown, no extra text.";
         }
@@ -2569,7 +2571,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 String gender = readAiString(node, "gender", "");
                 draft.size = normalizeSizeWithGender(readAiString(node, "size", ""), draft.title + " " + itemType + " " + gender);
                 draft.priceRsd = parseAiPrice(node.path("price_rsd").asText(""));
-                draft.article = readAiString(node, "article", "");
+                draft.article = normalizeArticleCandidate(readAiString(node, "article", ""));
                 if (withoutPhotoMode) {
                     draft.title = "Без фото";
                     draft.size = "";
@@ -2797,7 +2799,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
             return;
         }
         if (isArticleEnabled()) {
-            String article = draft.article == null ? "" : draft.article.replaceAll("\\D", "");
+            String article = normalizeArticleCandidate(draft.article);
             if (!article.matches("\\d{8}")) {
                 sendText(chatId, "❗ Укажите артикул из 8 цифр (через «Редактировать»).");
                 return;
@@ -3047,7 +3049,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         if (!isArticleEnabled()) {
             draft.article = generateInternalArticle();
         } else {
-            String article = draft.article == null ? "" : draft.article.replaceAll("\\D", "");
+            String article = normalizeArticleCandidate(draft.article);
             if (!article.matches("\\d{8}")) {
                 sendText(chatId, "❗ Для отложенной публикации укажите корректный артикул (8 цифр).");
                 return;
@@ -3368,6 +3370,21 @@ public class ShopifyBot extends TelegramLongPollingBot {
             return null;
         }
         return String.format(Locale.US, "%08d", Long.parseLong(digits));
+    }
+
+    private String normalizeArticleCandidate(String raw) {
+        if (raw == null) {
+            return "";
+        }
+        String digits = raw.replaceAll("\\D", "");
+        if (digits.isBlank()) {
+            return "";
+        }
+        String decoded = articleFromShopifyBarcode(digits);
+        if (decoded != null) {
+            return decoded;
+        }
+        return digits.matches("\\d{8}") ? digits : "";
     }
 
     private String toShopifyBarcode(String article) {

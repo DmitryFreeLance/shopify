@@ -1097,6 +1097,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
 
                 productId = shopify.createProduct(payload);
                 ensureShopifyBodyHasProductId(productId, payload.title, payload.bodyHtml, payload.priceEur, payload.size, payload.barcode);
+                ensureShopifyPosInventory(productId);
                 if (config.shopifyPublishAll) {
                     try {
                         shopify.publishProductToAll(productId);
@@ -1415,6 +1416,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
 
                 newProductId = shopify.createProduct(payload);
                 ensureShopifyBodyHasProductId(newProductId, payload.title, payload.bodyHtml, payload.priceEur, payload.size, payload.barcode);
+                ensureShopifyPosInventory(newProductId);
                 if (config.shopifyPublishAll) {
                     try {
                         shopify.publishProductToAll(newProductId);
@@ -1972,8 +1974,10 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 bodyHtml,
                 formatPriceForShopify(currentPriceRsd),
                 card.size,
-                toShopifyBarcode(card.article)
+                toShopifyBarcode(card.article),
+                card.article
         );
+        ensureShopifyPosInventory(card.productId);
         if (syncSaleCollection) {
             syncSaleCollection(card.productId, discountPercent > 0 || fixedPriceRsd != null);
         }
@@ -2478,7 +2482,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                         draft.article = generateInternalArticle();
                     } else {
                         String digits = draft.article == null ? "" : draft.article.replaceAll("\\D", "");
-                        draft.article = digits.matches("\\d{8}") ? digits : "";
+                        draft.article = digits.matches("\\d{8}") ? digits : generateInternalArticle();
                     }
                     if (draft.priceRsd <= 0) {
                         log.warn("AI draft has invalid price for batch item {}", gi + 1);
@@ -2893,6 +2897,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         try {
             productId = shopify.createProduct(payload);
             ensureShopifyBodyHasProductId(productId, payload.title, payload.bodyHtml, payload.priceEur, payload.size, payload.barcode);
+            ensureShopifyPosInventory(productId);
             if (draft.mode == DraftMode.POS_ONLY) {
                 shopify.publishProductToPosOnly(productId);
             } else if (config.shopifyPublishAll) {
@@ -3286,9 +3291,31 @@ public class ShopifyBot extends TelegramLongPollingBot {
             String finalTitle = (title == null || title.isBlank()) ? snap.title : title;
             String finalSize = size == null ? "" : size;
             String finalBarcode = (barcode == null || barcode.isBlank()) ? snap.variantBarcode : barcode;
-            shopify.updateProduct(productId, snap.variantId, finalTitle, desiredBody, price, finalSize, finalBarcode);
+            String finalSku = snap.variantSku == null || snap.variantSku.isBlank()
+                    ? articleFromShopifyBarcode(finalBarcode)
+                    : snap.variantSku;
+            shopify.updateProduct(productId, snap.variantId, finalTitle, desiredBody, price, finalSize, finalBarcode, finalSku);
         } catch (Exception e) {
             log.warn("Failed to set ID footer in Shopify description for product {}", productId, e);
+        }
+    }
+
+    private void ensureShopifyPosInventory(long productId) {
+        try {
+            shopify.ensureProductAvailableAtAllLocations(productId, 1);
+        } catch (Exception e) {
+            log.warn("Failed to stock product {} for Shopify POS", productId, e);
+        }
+    }
+
+    private void ensureShopifyPosInventory(ShopifyProductSnapshot snapshot) {
+        if (snapshot == null) {
+            return;
+        }
+        try {
+            shopify.ensureInventoryItemAvailableAtAllLocations(snapshot.inventoryItemId, snapshot.productId, 1);
+        } catch (Exception e) {
+            log.warn("Failed to stock product {} for Shopify POS", snapshot.productId, e);
         }
     }
 
@@ -4284,6 +4311,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
 
         long productId = shopify.createProduct(payload);
         ensureShopifyBodyHasProductId(productId, payload.title, payload.bodyHtml, payload.priceEur, payload.size, payload.barcode);
+        ensureShopifyPosInventory(productId);
         if (telegramLink != null && !telegramLink.isBlank()) {
             try {
                 shopify.setProductMetafield(productId,
@@ -4596,7 +4624,10 @@ public class ShopifyBot extends TelegramLongPollingBot {
             String bodyHtml = buildDescription(text, "", priceSelection, discount, telegramLink);
             bodyHtml = withShopifyProductIdFooterHtml(bodyHtml, productId);
             ShopifyProductSnapshot snap = shopify.getProductSnapshot(productId);
-            shopify.updateProduct(productId, snap.variantId, title, bodyHtml, priceSelection.price, size, toShopifyBarcode(article));
+            String normalizedArticle = article == null ? "" : article.replaceAll("\\D", "");
+            String nextSku = normalizedArticle.matches("\\d{8}") ? normalizedArticle : snap.variantSku;
+            shopify.updateProduct(productId, snap.variantId, title, bodyHtml, priceSelection.price, size, toShopifyBarcode(article), nextSku);
+            ensureShopifyPosInventory(snap);
             log.info("Product {} updated from edited message {}", productId, messageId);
             if (telegramLink != null && !telegramLink.isBlank()) {
                 try {
@@ -4798,6 +4829,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                     continue;
                 }
                 ShopifyProductSnapshot snapshot = shopify.getProductSnapshot(card.productId);
+                ensureShopifyPosInventory(snapshot);
                 if (expectedBarcode.equals(snapshot.variantBarcode)) {
                     nextOffset++;
                     continue;
@@ -4811,7 +4843,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
                         effectiveBody,
                         formatPriceForShopify(card.currentPriceRsd),
                         card.size,
-                        expectedBarcode
+                        expectedBarcode,
+                        card.article
                 );
                 log.info("Backfilled Shopify barcode for product {} -> {}", card.productId, expectedBarcode);
                 sleepQuietly(Math.max(500, config.productSyncDelayMs));

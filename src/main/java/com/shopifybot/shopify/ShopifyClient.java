@@ -15,6 +15,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.List;
 
 public class ShopifyClient {
@@ -25,6 +26,8 @@ public class ShopifyClient {
     private final String shopDomain;
     private final String apiVersion;
     private final TokenProvider tokenProvider;
+    private volatile List<Long> cachedLocationIds = List.of();
+    private volatile long cachedLocationIdsAtMs = 0L;
 
     public ShopifyClient(OkHttpClient http, String shopDomain, String apiVersion, TokenProvider tokenProvider) {
         this.http = http;
@@ -187,15 +190,21 @@ public class ShopifyClient {
         JsonNode product = root.path("product");
         JsonNode variants = product.path("variants");
         long variantId = 0;
+        long inventoryItemId = 0;
         String variantBarcode = "";
+        String variantSku = "";
         if (variants.isArray() && variants.size() > 0) {
             variantId = variants.get(0).path("id").asLong(0);
+            inventoryItemId = variants.get(0).path("inventory_item_id").asLong(0);
             variantBarcode = variants.get(0).path("barcode").asText("");
+            variantSku = variants.get(0).path("sku").asText("");
         }
         return new ShopifyProductSnapshot(
                 product.path("id").asLong(0),
                 variantId,
+                inventoryItemId,
                 variantBarcode,
+                variantSku,
                 product.path("title").asText(""),
                 product.path("body_html").asText(""),
                 product.path("tags").asText(""),
@@ -224,6 +233,10 @@ public class ShopifyClient {
     }
 
     public void updateProduct(long productId, long variantId, String title, String bodyHtml, String price, String size, String barcode) throws IOException {
+        updateProduct(productId, variantId, title, bodyHtml, price, size, barcode, null);
+    }
+
+    public void updateProduct(long productId, long variantId, String title, String bodyHtml, String price, String size, String barcode, String sku) throws IOException {
         ObjectNode root = mapper.createObjectNode();
         ObjectNode product = root.putObject("product");
         product.put("id", productId);
@@ -243,6 +256,9 @@ public class ShopifyClient {
         }
         if (barcode != null && !barcode.isBlank()) {
             variant.put("barcode", barcode);
+        }
+        if (sku != null && !sku.isBlank()) {
+            variant.put("sku", sku);
         }
         variant.put("price", price);
 
@@ -374,7 +390,8 @@ public class ShopifyClient {
             ObjectNode variables = mapper.createObjectNode();
             variables.put("id", productGid);
             variables.put("pub", pubId);
-            graphQL(mutation, variables);
+            JsonNode root = graphQL(mutation, variables);
+            assertGraphQlUserErrors(root.path("data").path("publishablePublish").path("userErrors"), "publish product " + productId + " to publication " + pubId);
         }
     }
 
@@ -398,7 +415,8 @@ public class ShopifyClient {
         ObjectNode pubVars = mapper.createObjectNode();
         pubVars.put("id", productGid);
         pubVars.put("pub", posPubId);
-        graphQL(publishMutation, pubVars);
+        JsonNode publishRoot = graphQL(publishMutation, pubVars);
+        assertGraphQlUserErrors(publishRoot.path("data").path("publishablePublish").path("userErrors"), "publish product " + productId + " to POS");
 
         String unpublishMutation = "mutation Unpublish($id: ID!, $pub: ID!) { publishableUnpublish(id: $id, input: {publicationId: $pub}) { userErrors { field message } } }";
         for (PublicationSummary pub : publications) {
@@ -407,10 +425,40 @@ public class ShopifyClient {
             unpubVars.put("id", productGid);
             unpubVars.put("pub", pub.id);
             try {
-                graphQL(unpublishMutation, unpubVars);
+                JsonNode root = graphQL(unpublishMutation, unpubVars);
+                assertGraphQlUserErrors(root.path("data").path("publishableUnpublish").path("userErrors"), "unpublish product " + productId + " from publication " + pub.id);
             } catch (Exception e) {
                 log.warn("Failed to unpublish product {} from publication {}", productId, pub.name, e);
             }
+        }
+    }
+
+    public void ensureProductAvailableAtAllLocations(long productId, int available) throws IOException {
+        ShopifyProductSnapshot snapshot = getProductSnapshot(productId);
+        ensureInventoryItemAvailableAtAllLocations(snapshot.inventoryItemId, productId, available);
+    }
+
+    public void ensureInventoryItemAvailableAtAllLocations(long inventoryItemId, long productId, int available) throws IOException {
+        if (inventoryItemId <= 0) {
+            throw new IOException("Inventory item is missing for product " + productId);
+        }
+        List<Long> locationIds = listLocationIds();
+        if (locationIds.isEmpty()) {
+            throw new IOException("No active Shopify locations found");
+        }
+        List<String> errors = new ArrayList<>();
+        for (Long locationId : locationIds) {
+            try {
+                setInventoryLevel(inventoryItemId, locationId, available);
+            } catch (Exception e) {
+                errors.add(locationId + ": " + e.getMessage());
+            }
+        }
+        if (errors.size() == locationIds.size()) {
+            throw new IOException("Failed to stock product " + productId + " at Shopify locations: " + String.join("; ", errors));
+        }
+        if (!errors.isEmpty()) {
+            log.warn("Partially stocked product {} at Shopify locations: {}", productId, String.join("; ", errors));
         }
     }
 
@@ -576,6 +624,56 @@ public class ShopifyClient {
             }
             return mapper.readTree(response.body().string());
         }
+    }
+
+    private void assertGraphQlUserErrors(JsonNode userErrors, String action) throws IOException {
+        if (userErrors == null || !userErrors.isArray() || userErrors.isEmpty()) {
+            return;
+        }
+        List<String> messages = new ArrayList<>();
+        for (JsonNode error : userErrors) {
+            String message = error.path("message").asText("");
+            if (message != null && !message.isBlank()) {
+                messages.add(message.trim());
+            }
+        }
+        if (messages.isEmpty()) {
+            messages.add("unknown Shopify GraphQL error");
+        }
+        throw new IOException("Failed to " + action + ": " + String.join("; ", messages));
+    }
+
+    private List<Long> listLocationIds() throws IOException {
+        long now = System.currentTimeMillis();
+        List<Long> cached = cachedLocationIds;
+        if (!cached.isEmpty() && (now - cachedLocationIdsAtMs) < 300_000L) {
+            return cached;
+        }
+        JsonNode root = get(restBase() + "/locations.json?limit=250");
+        List<Long> ids = new ArrayList<>();
+        JsonNode locations = root.path("locations");
+        if (locations.isArray()) {
+            for (JsonNode node : locations) {
+                long id = node.path("id").asLong(0);
+                if (id > 0) {
+                    ids.add(id);
+                }
+            }
+        }
+        List<Long> unmodifiable = Collections.unmodifiableList(ids);
+        cachedLocationIds = unmodifiable;
+        cachedLocationIdsAtMs = now;
+        return unmodifiable;
+    }
+
+    private void setInventoryLevel(long inventoryItemId, long locationId, int available) throws IOException {
+        ObjectNode root = mapper.createObjectNode();
+        ObjectNode inventoryLevel = root.putObject("inventory_level");
+        inventoryLevel.put("inventory_item_id", inventoryItemId);
+        inventoryLevel.put("location_id", locationId);
+        inventoryLevel.put("available", available);
+        inventoryLevel.put("disconnect_if_necessary", true);
+        post(restBase() + "/inventory_levels/set.json", root);
     }
 
     private ArrayNode buildMenuItems(List<MenuItemInput> items) {

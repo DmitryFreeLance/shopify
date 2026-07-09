@@ -74,7 +74,9 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private static final Pattern SHOPIFY_ID_FOOTER_PATTERN = Pattern.compile("(?is)(?:<br>\\s*)*ID:\\s*\\d+\\s*$");
     private static final String META_SHOPIFY_SYNC_OFFSET = "shopify:sync_offset";
     private static final String META_SHOPIFY_POS_ONLY_SYNC_OFFSET = "shopify:pos_only_sync_offset";
+    private static final String META_SHOPIFY_BARCODE_SYNC_OFFSET = "shopify:barcode_sync_offset";
     private static final String META_SHOPIFY_READ_COOLDOWN_UNTIL = "shopify:read_cooldown_until";
+    private static final String SHOPIFY_BARCODE_PREFIX = "2000";
     private static final String CB_MENU = "MENU";
     private static final String CB_NOOP = "NOOP";
     private static final String CB_ADD_PRODUCT = "OPEN:ADD_PRODUCT";
@@ -149,6 +151,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
 
         scheduler.scheduleWithFixedDelay(this::processReadyMediaGroups, 15, 15, TimeUnit.SECONDS);
         scheduler.scheduleWithFixedDelay(this::syncDeletedProductsSafe, config.productSyncSeconds, config.productSyncSeconds, TimeUnit.SECONDS);
+        scheduler.scheduleWithFixedDelay(this::syncShopifyBarcodesSafe, Math.max(45, config.productSyncSeconds), Math.max(45, config.productSyncSeconds), TimeUnit.SECONDS);
         scheduler.scheduleWithFixedDelay(this::syncDiscountsSafe, 60, Math.max(300, config.discountSyncSeconds), TimeUnit.SECONDS);
         scheduler.scheduleWithFixedDelay(this::processScheduledPostsSafe, 20, 20, TimeUnit.SECONDS);
     }
@@ -860,10 +863,10 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
 
         if (session.state == AdminState.ARTICLE_SEARCH_INPUT) {
-            String article = text.replaceAll("\\D", "");
-            if (!article.matches("\\d{8}")) {
+            String article = normalizeArticleSearchInput(text);
+            if (article == null) {
                 sendText(chatId,
-                        "Введите артикул из 8 цифр (например: 56789356).",
+                        "Введите артикул или штрихкод.\nПримеры: 5, 00000005 или 2000000000054.",
                         inlineSingleColumn(
                                 button("Отменить", CB_CANCEL_FLOW)
                         ));
@@ -1087,7 +1090,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 payload.productType = selectProductType(explicit);
                 payload.images = images;
                 if (finalArticleEnabled) {
-                    payload.barcode = finalArticle;
+                    payload.barcode = toShopifyBarcode(finalArticle);
                     payload.sku = finalArticle;
                 }
 
@@ -1405,7 +1408,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 payload.productType = selectProductType(explicit);
                 payload.imageUrls = imageUrls;
                 if (articleEnabled) {
-                    payload.barcode = finalArticle;
+                    payload.barcode = toShopifyBarcode(finalArticle);
                     payload.sku = finalArticle;
                 }
 
@@ -1968,7 +1971,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 bodyHtml,
                 formatPriceForShopify(currentPriceRsd),
                 card.size,
-                card.article
+                toShopifyBarcode(card.article)
         );
         if (syncSaleCollection) {
             syncSaleCollection(card.productId, discountPercent > 0 || fixedPriceRsd != null);
@@ -2880,7 +2883,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         payload.productType = "Без фото".equals(payload.title) ? "Без фото" : selectProductType(explicit);
         payload.images = images;
         if (isArticleEnabled()) {
-            payload.barcode = article;
+            payload.barcode = toShopifyBarcode(article);
             payload.sku = article;
         }
 
@@ -3321,6 +3324,61 @@ public class ShopifyBot extends TelegramLongPollingBot {
         return raw != null && "true".equalsIgnoreCase(raw.trim());
     }
 
+    private String normalizeArticleSearchInput(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String digits = raw.replaceAll("\\D", "");
+        if (digits.isBlank()) {
+            return null;
+        }
+        String decodedArticle = articleFromShopifyBarcode(digits);
+        if (decodedArticle != null) {
+            return decodedArticle;
+        }
+        if (digits.length() > 8) {
+            return null;
+        }
+        return String.format(Locale.US, "%08d", Long.parseLong(digits));
+    }
+
+    private String toShopifyBarcode(String article) {
+        if (article == null) {
+            return null;
+        }
+        String digits = article.replaceAll("\\D", "");
+        if (!digits.matches("\\d{8}")) {
+            return null;
+        }
+        String payload12 = SHOPIFY_BARCODE_PREFIX + digits;
+        return payload12 + ean13ChecksumDigit(payload12);
+    }
+
+    private String articleFromShopifyBarcode(String digits) {
+        if (digits == null || !digits.matches("\\d{13}") || !digits.startsWith(SHOPIFY_BARCODE_PREFIX)) {
+            return null;
+        }
+        String payload12 = digits.substring(0, 12);
+        int expectedChecksum = ean13ChecksumDigit(payload12);
+        int actualChecksum = digits.charAt(12) - '0';
+        if (expectedChecksum != actualChecksum) {
+            return null;
+        }
+        return digits.substring(SHOPIFY_BARCODE_PREFIX.length(), 12);
+    }
+
+    private int ean13ChecksumDigit(String payload12) {
+        if (payload12 == null || !payload12.matches("\\d{12}")) {
+            throw new IllegalArgumentException("EAN-13 payload must contain 12 digits");
+        }
+        int sum = 0;
+        for (int i = 0; i < payload12.length(); i++) {
+            int digit = payload12.charAt(i) - '0';
+            sum += digit * (i % 2 == 0 ? 1 : 3);
+        }
+        return (10 - (sum % 10)) % 10;
+    }
+
     private String generateInternalArticle() {
         for (int i = 0; i < 200; i++) {
             String candidate = String.format(Locale.US, "%08d", ThreadLocalRandom.current().nextInt(10000000, 99999999));
@@ -3509,6 +3567,14 @@ public class ShopifyBot extends TelegramLongPollingBot {
             syncDeletedProducts();
         } catch (Exception e) {
             log.warn("Product availability sync failed", e);
+        }
+    }
+
+    private void syncShopifyBarcodesSafe() {
+        try {
+            syncShopifyBarcodes();
+        } catch (Exception e) {
+            log.warn("Shopify barcode sync failed", e);
         }
     }
 
@@ -4197,7 +4263,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         payload.size = size;
         String article = TextParser.extractArticle(text);
         if (isArticleEnabled() && article != null && !article.isBlank()) {
-            payload.barcode = article;
+            payload.barcode = toShopifyBarcode(article);
             payload.sku = article;
         }
         payload.tags = buildTags(resolved, ai);
@@ -4518,7 +4584,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
             String bodyHtml = buildDescription(text, "", priceSelection, discount, telegramLink);
             bodyHtml = withShopifyProductIdFooterHtml(bodyHtml, productId);
             ShopifyProductSnapshot snap = shopify.getProductSnapshot(productId);
-            shopify.updateProduct(productId, snap.variantId, title, bodyHtml, priceSelection.price, size, article);
+            shopify.updateProduct(productId, snap.variantId, title, bodyHtml, priceSelection.price, size, toShopifyBarcode(article));
             log.info("Product {} updated from edited message {}", productId, messageId);
             if (telegramLink != null && !telegramLink.isBlank()) {
                 try {
@@ -4691,6 +4757,72 @@ public class ShopifyBot extends TelegramLongPollingBot {
                     "pos-only"
             );
         }
+    }
+
+    private void syncShopifyBarcodes() {
+        if (isShopifyReadCooldownActive()) {
+            return;
+        }
+        int total = db.countCardsForSync();
+        if (total <= 0) {
+            db.setMeta(META_SHOPIFY_BARCODE_SYNC_OFFSET, "0");
+            return;
+        }
+
+        int batchSize = Math.max(1, Math.min(10, config.productSyncBatchSize));
+        int offset = readCursorOffset(META_SHOPIFY_BARCODE_SYNC_OFFSET, total);
+        List<ProductCard> cards = db.listCardsForSync(batchSize, offset);
+        if (cards.isEmpty()) {
+            db.setMeta(META_SHOPIFY_BARCODE_SYNC_OFFSET, "0");
+            return;
+        }
+
+        int nextOffset = offset;
+        for (ProductCard card : cards) {
+            try {
+                String expectedBarcode = toShopifyBarcode(card.article);
+                if (expectedBarcode == null || expectedBarcode.isBlank()) {
+                    nextOffset++;
+                    continue;
+                }
+                ShopifyProductSnapshot snapshot = shopify.getProductSnapshot(card.productId);
+                if (expectedBarcode.equals(snapshot.variantBarcode)) {
+                    nextOffset++;
+                    continue;
+                }
+                String effectiveTitle = snapshot.title == null || snapshot.title.isBlank() ? card.title : snapshot.title;
+                String effectiveBody = snapshot.bodyHtml == null ? "" : snapshot.bodyHtml;
+                shopify.updateProduct(
+                        card.productId,
+                        snapshot.variantId,
+                        effectiveTitle,
+                        effectiveBody,
+                        formatPriceForShopify(card.currentPriceRsd),
+                        card.size,
+                        expectedBarcode
+                );
+                log.info("Backfilled Shopify barcode for product {} -> {}", card.productId, expectedBarcode);
+                sleepQuietly(Math.max(500, config.productSyncDelayMs));
+                nextOffset++;
+            } catch (RateLimitException e) {
+                recordShopifyReadCooldown(e.getRetryAfterSeconds(), "barcode-sync");
+                db.setMeta(META_SHOPIFY_BARCODE_SYNC_OFFSET, String.valueOf(Math.min(nextOffset, Math.max(0, total - 1))));
+                log.warn("Rate limited by Shopify during barcode sync (productId={}), pausing until next cycle", card.productId);
+                return;
+            } catch (Exception e) {
+                if (isShopifyProductMissingError(e)) {
+                    handleMissingShopifyProduct(card, "barcode-sync");
+                } else {
+                    log.warn("Failed to sync Shopify barcode for product {}", card.productId, e);
+                }
+                nextOffset++;
+            }
+        }
+
+        if (nextOffset >= total || cards.size() < batchSize) {
+            nextOffset = 0;
+        }
+        db.setMeta(META_SHOPIFY_BARCODE_SYNC_OFFSET, String.valueOf(nextOffset));
     }
 
     private boolean syncDeletedProductsBatch(String offsetMetaKey,

@@ -678,7 +678,7 @@ public class Database {
     }
 
     public List<ProductCard> listCardsForSync(int limit, int offset) {
-        return listProductsByStatuses(limit, offset, "status IN ('ACTIVE','RESERVED','POS_ONLY')");
+        return listProductsByStatuses(limit, offset, "status IN ('ACTIVE','RESERVED','POS_ONLY')", "updated_at DESC, created_at DESC");
     }
 
     public int countCardsForSync() {

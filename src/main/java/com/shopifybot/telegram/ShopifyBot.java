@@ -76,7 +76,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private static final String META_SHOPIFY_POS_ONLY_SYNC_OFFSET = "shopify:pos_only_sync_offset";
     private static final String META_SHOPIFY_BARCODE_SYNC_OFFSET = "shopify:barcode_sync_offset";
     private static final String META_SHOPIFY_READ_COOLDOWN_UNTIL = "shopify:read_cooldown_until";
-    private static final String SHOPIFY_BARCODE_PREFIX = "2000";
+    private static final String LEGACY_SHOPIFY_BARCODE_PREFIX = "2000";
     private static final String CB_MENU = "MENU";
     private static final String CB_NOOP = "NOOP";
     private static final String CB_ADD_PRODUCT = "OPEN:ADD_PRODUCT";
@@ -3350,12 +3350,17 @@ public class ShopifyBot extends TelegramLongPollingBot {
         if (!digits.matches("\\d{8}")) {
             return null;
         }
-        String payload12 = SHOPIFY_BARCODE_PREFIX + digits;
-        return payload12 + ean13ChecksumDigit(payload12);
+        return digits;
     }
 
     private String articleFromShopifyBarcode(String digits) {
-        if (digits == null || !digits.matches("\\d{13}") || !digits.startsWith(SHOPIFY_BARCODE_PREFIX)) {
+        if (digits == null) {
+            return null;
+        }
+        if (digits.matches("\\d{8}")) {
+            return digits;
+        }
+        if (!digits.matches("\\d{13}") || !digits.startsWith(LEGACY_SHOPIFY_BARCODE_PREFIX)) {
             return null;
         }
         String payload12 = digits.substring(0, 12);
@@ -3364,7 +3369,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         if (expectedChecksum != actualChecksum) {
             return null;
         }
-        return digits.substring(SHOPIFY_BARCODE_PREFIX.length(), 12);
+        return digits.substring(LEGACY_SHOPIFY_BARCODE_PREFIX.length(), 12);
     }
 
     private int ean13ChecksumDigit(String payload12) {

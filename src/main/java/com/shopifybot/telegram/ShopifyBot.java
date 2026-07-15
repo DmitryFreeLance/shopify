@@ -3661,6 +3661,19 @@ public class ShopifyBot extends TelegramLongPollingBot {
         boolean female = containsFemaleHint(lower);
         boolean male = containsMaleHint(lower);
 
+        String normalizedOriginal = value
+                .replaceAll("(?iu)^\\s*(vel|size)\\s*[-:]?\\s*", "")
+                .trim();
+        normalizedOriginal = normalizedOriginal
+                .replaceAll("(?iu)\\bmuski\\b|\\bmuško\\b|\\bmusko\\b", "muški")
+                .replaceAll("(?iu)\\bzenski\\b|\\bžensko\\b|\\bzensko\\b", "ženski")
+                .replaceAll("\\s+", " ")
+                .trim();
+
+        if (female && male) {
+            return normalizedOriginal;
+        }
+
         String remainder = value
                 .replaceAll("(?iu)\\b(vel|size)\\b\\s*[-:]?\\s*", "")
                 .replaceAll("(?iu)\\b(muški|muski|muško|musko|ženski|zenski|žensko|zensko|female|male|women|woman|men|man|женск|мужск)\\b", "")
@@ -4398,6 +4411,18 @@ public class ShopifyBot extends TelegramLongPollingBot {
 
     private String selectProductType(CategorySelection selection) {
         if (selection.entries.isEmpty()) return "";
+        LinkedHashSet<String> sections = new LinkedHashSet<>();
+        for (CategorySelection.Entry entry : selection.entries) {
+            if (entry.subcategory != null && !entry.subcategory.isBlank()) {
+                return entry.subcategory;
+            }
+            if (entry.section != null && !entry.section.isBlank() && !"Sniženje".equals(entry.section)) {
+                sections.add(entry.section);
+            }
+        }
+        if (sections.size() > 1) {
+            return String.join(" / ", sections);
+        }
         CategorySelection.Entry entry = selection.entries.get(0);
         return entry.subcategory != null ? entry.subcategory : entry.section;
     }

@@ -115,6 +115,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private static final String CB_SEARCH_RESERVE_ID = "SEARCH:RESERVE_ID";
     private static final String CB_SEARCH_SOLD_ID = "SEARCH:SOLD_ID";
     private static final String CB_SEARCH_MANUAL = "SEARCH:MANUAL";
+    private static final String CB_SEARCH_MANUAL_ID = "SEARCH:MANUAL_ID";
     private static final String CB_SEARCH_DISCOUNT_EXCLUDE = "SEARCH:DISCOUNT_EXCLUDE";
     private static final String CB_SEARCH_DISCOUNT_EXCLUDE_ID = "SEARCH:DISCOUNT_EXCLUDE_ID";
     private static final String CB_SEARCH_DISCOUNT_CUSTOM = "SEARCH:DISCOUNT_CUSTOM";
@@ -661,6 +662,13 @@ public class ShopifyBot extends TelegramLongPollingBot {
             answerCallback(callback, "");
             return;
         }
+        if (CB_SEARCH_MANUAL_ID.equals(data)) {
+            session.state = AdminState.PRODUCT_ID_SEARCH_INPUT;
+            session.searchScope = ProductSearchScope.MANUAL;
+            sendProductIdSearchPrompt(chatId, "ручной цены");
+            answerCallback(callback, "");
+            return;
+        }
         if (CB_SEARCH_DISCOUNT_EXCLUDE.equals(data)) {
             session.state = AdminState.ARTICLE_SEARCH_INPUT;
             session.searchScope = ProductSearchScope.DISCOUNT_EXCLUDE;
@@ -967,11 +975,14 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 || session.state == AdminState.DISCOUNT_CUSTOM_SELECT
                 || session.state == AdminState.MANUAL_DISCOUNT_SELECT
                 || session.state == AdminState.EDIT_SELECT) {
+            if (tryHandleDirectSelectionLookup(chatId, session, text)) {
+                return;
+            }
             int ordinal;
             try {
                 ordinal = Integer.parseInt(text);
             } catch (NumberFormatException e) {
-                sendText(chatId, "Введите номер позиции цифрой (например: 1).");
+                sendText(chatId, selectionInputHelpText(session.state));
                 return;
             }
             processSelectionByOrdinal(chatId, session, ordinal);
@@ -1755,7 +1766,13 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
         sb.append("\nВсего: ").append(total).append("\n");
         sb.append("Страница ").append(safePage + 1).append("/").append(pages).append("\n");
-        sb.append("Введите номер позиции цифрой.\n");
+        if (session.state == AdminState.DISCOUNT_EXCLUDE_SELECT
+                || session.state == AdminState.DISCOUNT_CUSTOM_SELECT
+                || session.state == AdminState.MANUAL_DISCOUNT_SELECT) {
+            sb.append("Введите номер позиции, Shopify ID или артикул.\n");
+        } else {
+            sb.append("Введите номер позиции цифрой.\n");
+        }
 
         if (items.isEmpty()) {
             sb.append("\nСписок пуст.");
@@ -1818,24 +1835,21 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 rows.add(List.of(button("🆔 Поиск по ID", CB_SEARCH_SOLD_ID)));
             }
         } else if ("DISCOUNT_EXCLUDE".equals(scope)) {
-            if (isArticleEnabled()) {
-                rows.add(List.of(
-                        button("🔎 Поиск по артиклу", CB_SEARCH_DISCOUNT_EXCLUDE),
-                        button("🆔 Поиск по ID", CB_SEARCH_DISCOUNT_EXCLUDE_ID)
-                ));
-            } else {
-                rows.add(List.of(button("🆔 Поиск по ID", CB_SEARCH_DISCOUNT_EXCLUDE_ID)));
-            }
+            rows.add(List.of(
+                    button("🔎 Поиск по артиклу", CB_SEARCH_DISCOUNT_EXCLUDE),
+                    button("🆔 Поиск по ID", CB_SEARCH_DISCOUNT_EXCLUDE_ID)
+            ));
         } else if ("DISCOUNT_CUSTOM".equals(scope)) {
-            if (isArticleEnabled()) {
-                rows.add(List.of(
-                        button("🔎 Поиск по артиклу", CB_SEARCH_DISCOUNT_CUSTOM),
-                        button("🆔 Поиск по ID", CB_SEARCH_DISCOUNT_CUSTOM_ID)
-                ));
-            } else {
-                rows.add(List.of(button("🆔 Поиск по ID", CB_SEARCH_DISCOUNT_CUSTOM_ID)));
-            }
-        } else if (isArticleEnabled()) {
+            rows.add(List.of(
+                    button("🔎 Поиск по артиклу", CB_SEARCH_DISCOUNT_CUSTOM),
+                    button("🆔 Поиск по ID", CB_SEARCH_DISCOUNT_CUSTOM_ID)
+            ));
+        } else if ("MANUAL".equals(scope)) {
+            rows.add(List.of(
+                    button("🔎 Поиск по артиклу", CB_SEARCH_MANUAL),
+                    button("🆔 Поиск по ID", CB_SEARCH_MANUAL_ID)
+            ));
+        } else {
             rows.add(List.of(button("🔎 Поиск по артиклу", searchCallbackForScope(scope))));
         }
         String backCallback = ("DISCOUNT_EXCLUDE".equals(scope) || "DISCOUNT_CUSTOM".equals(scope) || "MANUAL".equals(scope))
@@ -1871,12 +1885,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
     }
 
     private void sendArticleSearchPrompt(long chatId) {
-        if (!isArticleEnabled()) {
-            sendText(chatId, "Поиск по артиклу недоступен, пока артикулы отключены (/articul on).");
-            return;
-        }
         sendText(chatId,
-                "🔎 Введите артикул (8 цифр), например: 56789356",
+                "🔎 Введите артикул или штрихкод.\nПримеры: 56789356, 00000005 или 992700000001",
                 inlineSingleColumn(
                         button("Отменить", CB_CANCEL_FLOW)
                 ));
@@ -1899,10 +1909,6 @@ public class ShopifyBot extends TelegramLongPollingBot {
     }
 
     private void processArticleSearch(long chatId, AdminSession session, String article) {
-        if (!isArticleEnabled()) {
-            sendText(chatId, "Поиск по артиклу недоступен, пока артикулы отключены (/articul on).");
-            return;
-        }
         ProductSearchScope scope = session.searchScope == null ? ProductSearchScope.PRODUCTS : session.searchScope;
         Database.ProductCard card;
         Integer ordinal;
@@ -1958,9 +1964,9 @@ public class ShopifyBot extends TelegramLongPollingBot {
                     sendText(chatId, "Товар с таким артикулом не найден среди активных.");
                     return;
                 }
-                ordinal = db.findVisibleOrdinalByProductId(card.productId);
                 session.state = AdminState.MANUAL_DISCOUNT_SELECT;
-                break;
+                beginManualDiscountFlow(chatId, session, card);
+                return;
             case EDIT:
                 card = db.findVisibleProductByArticle(article);
                 if (card == null) {
@@ -2061,7 +2067,88 @@ public class ShopifyBot extends TelegramLongPollingBot {
             return;
         }
 
+        if (scope == ProductSearchScope.MANUAL) {
+            if (!"ACTIVE".equals(card.status) && !"RESERVED".equals(card.status)) {
+                sendText(chatId, "Товар с таким ID не найден среди активных/зарезервированных.");
+                return;
+            }
+            session.state = AdminState.MANUAL_DISCOUNT_SELECT;
+            beginManualDiscountFlow(chatId, session, card);
+            return;
+        }
+
         sendText(chatId, "Поиск по ID для этого раздела пока не поддерживается.");
+    }
+
+    private boolean tryHandleDirectSelectionLookup(long chatId, AdminSession session, String rawInput) {
+        if (session.state != AdminState.DISCOUNT_EXCLUDE_SELECT
+                && session.state != AdminState.DISCOUNT_CUSTOM_SELECT
+                && session.state != AdminState.MANUAL_DISCOUNT_SELECT) {
+            return false;
+        }
+        String value = rawInput == null ? "" : rawInput.trim();
+        if (value.isBlank()) {
+            return false;
+        }
+
+        Database.ProductCard byId = tryFindSelectableProductById(value);
+        if (byId != null) {
+            applyDirectSelectionLookup(chatId, session, byId);
+            return true;
+        }
+
+        String article = normalizeArticleSearchInput(value);
+        if (article != null) {
+            Database.ProductCard byArticle = db.findVisibleProductByArticle(article);
+            if (byArticle != null) {
+                applyDirectSelectionLookup(chatId, session, byArticle);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private Database.ProductCard tryFindSelectableProductById(String rawInput) {
+        String digits = rawInput == null ? "" : rawInput.replaceAll("\\D", "");
+        if (digits.isBlank() || digits.length() > 18) {
+            return null;
+        }
+        try {
+            long productId = Long.parseLong(digits);
+            Database.ProductCard card = db.findProductCardById(productId);
+            if (card == null) {
+                return null;
+            }
+            if (!"ACTIVE".equals(card.status) && !"RESERVED".equals(card.status)) {
+                return null;
+            }
+            return card;
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private void applyDirectSelectionLookup(long chatId, AdminSession session, ProductCard card) {
+        if (session.state == AdminState.DISCOUNT_EXCLUDE_SELECT) {
+            applyDiscountExclusion(chatId, session, card);
+            return;
+        }
+        if (session.state == AdminState.DISCOUNT_CUSTOM_SELECT) {
+            beginCustomDiscountFlow(chatId, session, card);
+            return;
+        }
+        if (session.state == AdminState.MANUAL_DISCOUNT_SELECT) {
+            beginManualDiscountFlow(chatId, session, card);
+        }
+    }
+
+    private String selectionInputHelpText(AdminState state) {
+        if (state == AdminState.DISCOUNT_EXCLUDE_SELECT
+                || state == AdminState.DISCOUNT_CUSTOM_SELECT
+                || state == AdminState.MANUAL_DISCOUNT_SELECT) {
+            return "Введите номер позиции, Shopify ID или артикул.";
+        }
+        return "Введите номер позиции цифрой (например: 1).";
     }
 
     private void markCardAsSold(ProductCard card) throws IOException {
@@ -3939,6 +4026,18 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 "Введите свою скидку в процентах для товара:\n" + card.title +
                         "\nТекущая цена: " + formatRsd(card.currentPriceRsd) + " RSD" +
                         "\nПример: 15 или 30%",
+                inlineSingleColumn(
+                        button("Отменить", CB_CANCEL_FLOW)
+                ));
+    }
+
+    private void beginManualDiscountFlow(long chatId, AdminSession session, ProductCard card) {
+        session.selectedProductId = card.productId;
+        session.state = AdminState.MANUAL_DISCOUNT_INPUT;
+        sendText(chatId,
+                "Введите ручную цену для товара:\n" + card.title +
+                        "\nТекущая цена: " + formatRsd(card.currentPriceRsd) + " RSD" +
+                        "\nПример: 1200",
                 inlineSingleColumn(
                         button("Отменить", CB_CANCEL_FLOW)
                 ));

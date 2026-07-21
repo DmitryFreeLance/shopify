@@ -3,7 +3,9 @@ package com.shopifybot.db;
 import java.sql.*;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 public class Database {
     private final String jdbcUrl;
@@ -82,6 +84,13 @@ public class Database {
                     "created_at INTEGER NOT NULL," +
                     "updated_at INTEGER NOT NULL" +
                     ")");
+            stmt.executeUpdate("CREATE TABLE IF NOT EXISTS discount_rules (" +
+                    "product_id INTEGER PRIMARY KEY," +
+                    "rule_type TEXT NOT NULL," +
+                    "custom_discount_percent INTEGER," +
+                    "created_at INTEGER NOT NULL," +
+                    "updated_at INTEGER NOT NULL" +
+                    ")");
             stmt.executeUpdate("CREATE TABLE IF NOT EXISTS scheduled_posts (" +
                     "id INTEGER PRIMARY KEY AUTOINCREMENT," +
                     "mode TEXT NOT NULL," +
@@ -104,6 +113,7 @@ public class Database {
             stmt.executeUpdate("CREATE INDEX IF NOT EXISTS idx_publication_slots_publish_at ON publication_slots(publish_at)");
             stmt.executeUpdate("CREATE INDEX IF NOT EXISTS idx_product_cards_status ON product_cards(status)");
             stmt.executeUpdate("CREATE INDEX IF NOT EXISTS idx_product_cards_updated_at ON product_cards(updated_at)");
+            stmt.executeUpdate("CREATE INDEX IF NOT EXISTS idx_discount_rules_updated_at ON discount_rules(updated_at)");
             try {
                 stmt.executeUpdate("ALTER TABLE collections ADD COLUMN handle TEXT");
             } catch (SQLException ignored) {
@@ -905,10 +915,15 @@ public class Database {
     }
 
     public void deleteProductCard(long productId) {
-        String sql = "DELETE FROM product_cards WHERE product_id=?";
-        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setLong(1, productId);
-            ps.executeUpdate();
+        String deleteCardSql = "DELETE FROM product_cards WHERE product_id=?";
+        String deleteRuleSql = "DELETE FROM discount_rules WHERE product_id=?";
+        try (Connection conn = connect();
+             PreparedStatement deleteCard = conn.prepareStatement(deleteCardSql);
+             PreparedStatement deleteRule = conn.prepareStatement(deleteRuleSql)) {
+            deleteCard.setLong(1, productId);
+            deleteCard.executeUpdate();
+            deleteRule.setLong(1, productId);
+            deleteRule.executeUpdate();
         } catch (SQLException e) {
             throw new RuntimeException("DB deleteProductCard failed", e);
         }
@@ -1128,6 +1143,70 @@ public class Database {
         }
     }
 
+    public void upsertDiscountRule(long productId, String ruleType, Integer customDiscountPercent) {
+        long now = Instant.now().getEpochSecond();
+        String sql = "INSERT INTO discount_rules(product_id, rule_type, custom_discount_percent, created_at, updated_at) " +
+                "VALUES(?,?,?,?,?) " +
+                "ON CONFLICT(product_id) DO UPDATE SET " +
+                "rule_type=excluded.rule_type, custom_discount_percent=excluded.custom_discount_percent, updated_at=excluded.updated_at";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, productId);
+            ps.setString(2, ruleType);
+            if (customDiscountPercent == null) {
+                ps.setNull(3, Types.INTEGER);
+            } else {
+                ps.setInt(3, customDiscountPercent);
+            }
+            ps.setLong(4, now);
+            ps.setLong(5, now);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("DB upsertDiscountRule failed", e);
+        }
+    }
+
+    public void deleteDiscountRule(long productId) {
+        String sql = "DELETE FROM discount_rules WHERE product_id=?";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, productId);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("DB deleteDiscountRule failed", e);
+        }
+    }
+
+    public DiscountRule findDiscountRule(long productId) {
+        String sql = "SELECT product_id, rule_type, custom_discount_percent, created_at, updated_at FROM discount_rules WHERE product_id=?";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, productId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return mapDiscountRule(rs);
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("DB findDiscountRule failed", e);
+        }
+        return null;
+    }
+
+    public Map<Long, DiscountRule> listDiscountRulesByProductId() {
+        Map<Long, DiscountRule> items = new LinkedHashMap<>();
+        String sql = "SELECT product_id, rule_type, custom_discount_percent, created_at, updated_at " +
+                "FROM discount_rules ORDER BY updated_at DESC, product_id DESC";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    DiscountRule rule = mapDiscountRule(rs);
+                    items.put(rule.productId, rule);
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("DB listDiscountRulesByProductId failed", e);
+        }
+        return items;
+    }
+
     public void touchProductCardMessage(long productId, String channelId, long messageId, String mediaGroupId) {
         String sql = "UPDATE product_cards SET channel_id=?, message_id=?, media_group_id=?, updated_at=? WHERE product_id=?";
         try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -1161,6 +1240,18 @@ public class Database {
                 rs.getString(13),
                 rs.getLong(14),
                 rs.getLong(15)
+        );
+    }
+
+    private DiscountRule mapDiscountRule(ResultSet rs) throws SQLException {
+        Number customRaw = (Number) rs.getObject(3);
+        Integer customDiscountPercent = customRaw == null ? null : customRaw.intValue();
+        return new DiscountRule(
+                rs.getLong(1),
+                rs.getString(2),
+                customDiscountPercent,
+                rs.getLong(4),
+                rs.getLong(5)
         );
     }
 
@@ -1276,6 +1367,26 @@ public class Database {
             this.status = status;
             this.createdAt = createdAt;
             this.updatedAt = updatedAt;
+        }
+    }
+
+    public static class DiscountRule {
+        public final long productId;
+        public final String ruleType;
+        public final Integer customDiscountPercent;
+        public final long createdAt;
+        public final long updatedAt;
+
+        public DiscountRule(long productId, String ruleType, Integer customDiscountPercent, long createdAt, long updatedAt) {
+            this.productId = productId;
+            this.ruleType = ruleType;
+            this.customDiscountPercent = customDiscountPercent;
+            this.createdAt = createdAt;
+            this.updatedAt = updatedAt;
+        }
+
+        public boolean isCustomDiscount() {
+            return "CUSTOM".equalsIgnoreCase(ruleType) && customDiscountPercent != null;
         }
     }
 

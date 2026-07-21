@@ -8,6 +8,7 @@ import com.shopifybot.ai.CategorySelection;
 import com.shopifybot.ai.Classification;
 import com.shopifybot.ai.KieAiClient;
 import com.shopifybot.db.Database;
+import com.shopifybot.db.Database.DiscountRule;
 import com.shopifybot.db.Database.ProductCard;
 import com.shopifybot.db.Database.UserRecord;
 import com.shopifybot.shopify.ShopifyClient;
@@ -100,6 +101,9 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private static final String CB_DISCOUNTS_RESET = "DISCOUNT:RESET";
     private static final String CB_DISCOUNTS_RESET_CONFIRM = "DISCOUNT:RESET_CONFIRM";
     private static final String CB_DISCOUNTS_SET_DATE = "DISCOUNT:SET_DATE";
+    private static final String CB_DISCOUNT_EXCLUDE = "DISCOUNT:EXCLUDE";
+    private static final String CB_DISCOUNT_CUSTOM = "DISCOUNT:CUSTOM";
+    private static final String CB_DISCOUNT_EXCLUDED_LIST = "DISCOUNT:EXCLUDED_LIST";
     private static final String CB_MANUAL_DISCOUNT = "OPEN:MANUAL_DISCOUNT";
     private static final String CB_DONE_PHOTOS = "FLOW:DONE_PHOTOS";
     private static final String CB_BACK_TO_PHOTOS = "FLOW:BACK_TO_PHOTOS";
@@ -111,6 +115,10 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private static final String CB_SEARCH_RESERVE_ID = "SEARCH:RESERVE_ID";
     private static final String CB_SEARCH_SOLD_ID = "SEARCH:SOLD_ID";
     private static final String CB_SEARCH_MANUAL = "SEARCH:MANUAL";
+    private static final String CB_SEARCH_DISCOUNT_EXCLUDE = "SEARCH:DISCOUNT_EXCLUDE";
+    private static final String CB_SEARCH_DISCOUNT_EXCLUDE_ID = "SEARCH:DISCOUNT_EXCLUDE_ID";
+    private static final String CB_SEARCH_DISCOUNT_CUSTOM = "SEARCH:DISCOUNT_CUSTOM";
+    private static final String CB_SEARCH_DISCOUNT_CUSTOM_ID = "SEARCH:DISCOUNT_CUSTOM_ID";
     private static final String CB_SEARCH_EDIT = "SEARCH:EDIT";
     private static final String CB_SEARCH_EDIT_ID = "SEARCH:EDIT_ID";
     private static final String CB_DRAFT_EDIT = "DRAFT:EDIT";
@@ -411,6 +419,26 @@ public class ShopifyBot extends TelegramLongPollingBot {
             answerCallback(callback, "");
             return;
         }
+        if (CB_DISCOUNT_EXCLUDE.equals(data)) {
+            resetSession(session);
+            session.state = AdminState.DISCOUNT_EXCLUDE_SELECT;
+            sendSelectableProductsPage(chatId, session, 0);
+            answerCallback(callback, "");
+            return;
+        }
+        if (CB_DISCOUNT_CUSTOM.equals(data)) {
+            resetSession(session);
+            session.state = AdminState.DISCOUNT_CUSTOM_SELECT;
+            sendSelectableProductsPage(chatId, session, 0);
+            answerCallback(callback, "");
+            return;
+        }
+        if (CB_DISCOUNT_EXCLUDED_LIST.equals(data)) {
+            resetSession(session);
+            sendExcludedDiscountsPage(chatId, 0);
+            answerCallback(callback, "");
+            return;
+        }
         if (CB_MANUAL_DISCOUNT.equals(data)) {
             resetSession(session);
             session.state = AdminState.MANUAL_DISCOUNT_SELECT;
@@ -633,6 +661,34 @@ public class ShopifyBot extends TelegramLongPollingBot {
             answerCallback(callback, "");
             return;
         }
+        if (CB_SEARCH_DISCOUNT_EXCLUDE.equals(data)) {
+            session.state = AdminState.ARTICLE_SEARCH_INPUT;
+            session.searchScope = ProductSearchScope.DISCOUNT_EXCLUDE;
+            sendArticleSearchPrompt(chatId);
+            answerCallback(callback, "");
+            return;
+        }
+        if (CB_SEARCH_DISCOUNT_EXCLUDE_ID.equals(data)) {
+            session.state = AdminState.PRODUCT_ID_SEARCH_INPUT;
+            session.searchScope = ProductSearchScope.DISCOUNT_EXCLUDE;
+            sendProductIdSearchPrompt(chatId, "исключения из авто-скидок");
+            answerCallback(callback, "");
+            return;
+        }
+        if (CB_SEARCH_DISCOUNT_CUSTOM.equals(data)) {
+            session.state = AdminState.ARTICLE_SEARCH_INPUT;
+            session.searchScope = ProductSearchScope.DISCOUNT_CUSTOM;
+            sendArticleSearchPrompt(chatId);
+            answerCallback(callback, "");
+            return;
+        }
+        if (CB_SEARCH_DISCOUNT_CUSTOM_ID.equals(data)) {
+            session.state = AdminState.PRODUCT_ID_SEARCH_INPUT;
+            session.searchScope = ProductSearchScope.DISCOUNT_CUSTOM;
+            sendProductIdSearchPrompt(chatId, "своей скидки");
+            answerCallback(callback, "");
+            return;
+        }
         if (CB_SEARCH_EDIT.equals(data)) {
             session.state = AdminState.ARTICLE_SEARCH_INPUT;
             session.searchScope = ProductSearchScope.EDIT;
@@ -702,6 +758,14 @@ public class ShopifyBot extends TelegramLongPollingBot {
                     session.state = AdminState.SOLD_SELECT;
                     sendSelectableProductsPage(chatId, session, page);
                     break;
+                case "DISCOUNT_EXCLUDE":
+                    session.state = AdminState.DISCOUNT_EXCLUDE_SELECT;
+                    sendSelectableProductsPage(chatId, session, page);
+                    break;
+                case "DISCOUNT_CUSTOM":
+                    session.state = AdminState.DISCOUNT_CUSTOM_SELECT;
+                    sendSelectableProductsPage(chatId, session, page);
+                    break;
                 case "MANUAL":
                     session.state = AdminState.MANUAL_DISCOUNT_SELECT;
                     sendSelectableProductsPage(chatId, session, page);
@@ -709,6 +773,9 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 case "EDIT":
                     session.state = AdminState.EDIT_SELECT;
                     sendSelectableProductsPage(chatId, session, page);
+                    break;
+                case "DISCOUNT_RULES":
+                    sendExcludedDiscountsPage(chatId, page);
                     break;
                 default:
                     break;
@@ -896,6 +963,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
         if (session.state == AdminState.RESERVE_SELECT
                 || session.state == AdminState.UNRESERVE_SELECT
                 || session.state == AdminState.SOLD_SELECT
+                || session.state == AdminState.DISCOUNT_EXCLUDE_SELECT
+                || session.state == AdminState.DISCOUNT_CUSTOM_SELECT
                 || session.state == AdminState.MANUAL_DISCOUNT_SELECT
                 || session.state == AdminState.EDIT_SELECT) {
             int ordinal;
@@ -906,6 +975,25 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 return;
             }
             processSelectionByOrdinal(chatId, session, ordinal);
+            return;
+        }
+
+        if (session.state == AdminState.DISCOUNT_CUSTOM_INPUT) {
+            if (session.selectedProductId <= 0) {
+                resetSession(session);
+                sendDiscountsDashboard(chatId, "⚠️ Товар для своей скидки не выбран. Начните заново.");
+                return;
+            }
+            Integer customDiscountPercent = parseDiscountPercentInput(text);
+            if (customDiscountPercent == null) {
+                sendText(chatId,
+                        "Введите скидку в процентах, например: 15 или 30%",
+                        inlineSingleColumn(
+                                button("Отменить", CB_CANCEL_FLOW)
+                        ));
+                return;
+            }
+            applyCustomDiscount(chatId, session, customDiscountPercent);
             return;
         }
 
@@ -1654,8 +1742,12 @@ public class ShopifyBot extends TelegramLongPollingBot {
             sb.append("🟡 Выберите товар для резерва.");
         } else if (session.state == AdminState.UNRESERVE_SELECT) {
             sb.append("🟢 Выберите товар для снятия резерва.");
+        } else if (session.state == AdminState.DISCOUNT_EXCLUDE_SELECT) {
+            sb.append("🚫 Выберите товар, который нужно исключить из авто-скидок.");
+        } else if (session.state == AdminState.DISCOUNT_CUSTOM_SELECT) {
+            sb.append("🏷 Выберите товар, для которого нужно задать свою скидку.");
         } else if (session.state == AdminState.MANUAL_DISCOUNT_SELECT) {
-            sb.append("🏷 Выберите товар для ручной скидки.");
+            sb.append("💸 Выберите товар для ручной цены.");
         } else if (session.state == AdminState.EDIT_SELECT) {
             sb.append("✏️ Выберите товар для редактирования.");
         } else {
@@ -1691,6 +1783,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
 
         String scope = session.state == AdminState.RESERVE_SELECT ? "RESERVE"
                 : session.state == AdminState.UNRESERVE_SELECT ? "UNRESERVE"
+                : session.state == AdminState.DISCOUNT_EXCLUDE_SELECT ? "DISCOUNT_EXCLUDE"
+                : session.state == AdminState.DISCOUNT_CUSTOM_SELECT ? "DISCOUNT_CUSTOM"
                 : session.state == AdminState.MANUAL_DISCOUNT_SELECT ? "MANUAL"
                 : session.state == AdminState.EDIT_SELECT ? "EDIT"
                 : "SOLD";
@@ -1723,10 +1817,32 @@ public class ShopifyBot extends TelegramLongPollingBot {
             } else {
                 rows.add(List.of(button("🆔 Поиск по ID", CB_SEARCH_SOLD_ID)));
             }
+        } else if ("DISCOUNT_EXCLUDE".equals(scope)) {
+            if (isArticleEnabled()) {
+                rows.add(List.of(
+                        button("🔎 Поиск по артиклу", CB_SEARCH_DISCOUNT_EXCLUDE),
+                        button("🆔 Поиск по ID", CB_SEARCH_DISCOUNT_EXCLUDE_ID)
+                ));
+            } else {
+                rows.add(List.of(button("🆔 Поиск по ID", CB_SEARCH_DISCOUNT_EXCLUDE_ID)));
+            }
+        } else if ("DISCOUNT_CUSTOM".equals(scope)) {
+            if (isArticleEnabled()) {
+                rows.add(List.of(
+                        button("🔎 Поиск по артиклу", CB_SEARCH_DISCOUNT_CUSTOM),
+                        button("🆔 Поиск по ID", CB_SEARCH_DISCOUNT_CUSTOM_ID)
+                ));
+            } else {
+                rows.add(List.of(button("🆔 Поиск по ID", CB_SEARCH_DISCOUNT_CUSTOM_ID)));
+            }
         } else if (isArticleEnabled()) {
             rows.add(List.of(button("🔎 Поиск по артиклу", searchCallbackForScope(scope))));
         }
-        rows.add(List.of(button("⬅ Назад в меню", CB_MENU)));
+        String backCallback = ("DISCOUNT_EXCLUDE".equals(scope) || "DISCOUNT_CUSTOM".equals(scope) || "MANUAL".equals(scope))
+                ? CB_DISCOUNTS
+                : CB_MENU;
+        String backLabel = CB_DISCOUNTS.equals(backCallback) ? "⬅ Назад к скидкам" : "⬅ Назад в меню";
+        rows.add(List.of(button(backLabel, backCallback)));
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
         markup.setKeyboard(rows);
         sendText(chatId, sb.toString(), markup);
@@ -1746,6 +1862,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private String searchCallbackForScope(String scope) {
         if ("RESERVE".equals(scope)) return CB_SEARCH_RESERVE;
         if ("UNRESERVE".equals(scope)) return CB_SEARCH_UNRESERVE;
+        if ("DISCOUNT_EXCLUDE".equals(scope)) return CB_SEARCH_DISCOUNT_EXCLUDE;
+        if ("DISCOUNT_CUSTOM".equals(scope)) return CB_SEARCH_DISCOUNT_CUSTOM;
         if ("MANUAL".equals(scope)) return CB_SEARCH_MANUAL;
         if ("SOLD".equals(scope)) return CB_SEARCH_SOLD;
         if ("EDIT".equals(scope)) return CB_SEARCH_EDIT;
@@ -1816,6 +1934,24 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 ordinal = db.findVisibleOrdinalByProductId(card.productId);
                 session.state = AdminState.SOLD_SELECT;
                 break;
+            case DISCOUNT_EXCLUDE:
+                card = db.findVisibleProductByArticle(article);
+                if (card == null) {
+                    sendText(chatId, "Товар с таким артикулом не найден среди активных.");
+                    return;
+                }
+                session.state = AdminState.DISCOUNT_EXCLUDE_SELECT;
+                applyDiscountExclusion(chatId, session, card);
+                return;
+            case DISCOUNT_CUSTOM:
+                card = db.findVisibleProductByArticle(article);
+                if (card == null) {
+                    sendText(chatId, "Товар с таким артикулом не найден среди активных.");
+                    return;
+                }
+                session.state = AdminState.DISCOUNT_CUSTOM_SELECT;
+                beginCustomDiscountFlow(chatId, session, card);
+                return;
             case MANUAL:
                 card = db.findVisibleProductByArticle(article);
                 if (card == null) {
@@ -1907,6 +2043,21 @@ public class ShopifyBot extends TelegramLongPollingBot {
             sb.append("Введите этот номер цифрой для действия.");
             sendText(chatId, sb.toString());
             session.state = (scope == ProductSearchScope.RESERVE) ? AdminState.RESERVE_SELECT : AdminState.SOLD_SELECT;
+            return;
+        }
+
+        if (scope == ProductSearchScope.DISCOUNT_EXCLUDE || scope == ProductSearchScope.DISCOUNT_CUSTOM) {
+            if (!"ACTIVE".equals(card.status) && !"RESERVED".equals(card.status)) {
+                sendText(chatId, "Товар с таким ID не найден среди активных/зарезервированных.");
+                return;
+            }
+            if (scope == ProductSearchScope.DISCOUNT_EXCLUDE) {
+                session.state = AdminState.DISCOUNT_EXCLUDE_SELECT;
+                applyDiscountExclusion(chatId, session, card);
+            } else {
+                session.state = AdminState.DISCOUNT_CUSTOM_SELECT;
+                beginCustomDiscountFlow(chatId, session, card);
+            }
             return;
         }
 
@@ -2120,7 +2271,6 @@ public class ShopifyBot extends TelegramLongPollingBot {
     }
 
     private void sendDiscountsDashboard(long chatId, String statusMessage) {
-        final int MAX_TG_TEXT = 3800;
         LocalDate today = LocalDate.now(discountZone == null ? ZoneId.systemDefault() : discountZone);
         boolean enabled = isDiscountsEnabled();
         String phase = describeDiscountStage(today);
@@ -2128,6 +2278,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         String dateLabel = today.format(DateTimeFormatter.ofPattern("dd.MM.yyyy"));
         LocalDate cycleStart = getDiscountResetStartDate();
         List<ProductCard> cards = db.listVisibleProducts(5000, 0);
+        Map<Long, DiscountRule> discountRules = db.listDiscountRulesByProductId();
 
         StringBuilder text = new StringBuilder();
         text.append("🧾 Скидки\n");
@@ -2142,64 +2293,11 @@ public class ShopifyBot extends TelegramLongPollingBot {
         text.append("Прогрессия: каждое воскресенье 0% → 15% → 30% → 50%.\n");
         text.append("Последняя неделя месяца: Пн 20%, Вт 30%, Ср 40%, Чт 50%, Пт 500, Сб/Вс 350.");
         text.append("\n");
-        text.append(buildDiscountGroupSummary(cards, today));
-        text.append("\n\nТовары в работе: ").append(cards.size());
-        if (cards.isEmpty()) {
-            text.append("\nСписок пуст.");
-        } else {
-            boolean articleEnabled = isArticleEnabled();
-            int shown = 0;
-            int hidden = 0;
-            for (int i = 0; i < cards.size(); i++) {
-                ProductCard card = cards.get(i);
-                DiscountTarget target = calculateDiscountTarget(card, today);
-                int currentDiscount = card.fixedPriceRsd != null
-                        ? discountPercentByFixed(card.basePriceRsd, card.fixedPriceRsd)
-                        : card.discountPercent;
-                StringBuilder item = new StringBuilder();
-                item.append("\n")
-                        .append(i + 1)
-                        .append(". ")
-                        .append(card.title)
-                        .append(" | ")
-                        .append(formatRsd(card.currentPriceRsd))
-                        .append(" RSD");
-                if (articleEnabled && card.article != null && !card.article.isBlank()) {
-                    item.append(" | Artikal: ").append(card.article);
-                } else if (card.size != null && !card.size.isBlank()) {
-                    item.append(" | Vel - ").append(card.size);
-                }
-                item.append("\n   текущая скидка: ").append(currentDiscount).append("%");
-                if (target != null) {
-                    item.append(" | авто сегодня: ").append(target.discountPercent).append("%");
-                    if (target.fixedPriceRsd != null) {
-                        item.append(" (фикс ").append(formatRsd(target.fixedPriceRsd)).append(")");
-                    } else {
-                        item.append(" (").append(formatRsd(target.currentPriceRsd)).append(" RSD)");
-                    }
-                }
-                if (text.length() + item.length() > MAX_TG_TEXT - 120) {
-                    hidden = cards.size() - i;
-                    break;
-                }
-                text.append(item);
-                shown++;
-            }
-            if (hidden > 0) {
-                text.append("\n… Показано ").append(shown).append(" из ").append(cards.size()).append(" товаров.");
-                text.append("\nОткройте «Список товаров» для полного списка.");
-            }
-        }
+        text.append(buildDiscountGroupSummary(cards, today, discountRules));
+        text.append("\n");
+        text.append(buildDiscountRuleSummary(cards, discountRules));
         if (statusMessage != null && !statusMessage.isBlank()) {
-            String suffix = "\n\n" + statusMessage;
-            if (text.length() + suffix.length() <= MAX_TG_TEXT) {
-                text.append(suffix);
-            } else {
-                int left = MAX_TG_TEXT - text.length() - 4;
-                if (left > 20) {
-                    text.append("\n\n").append(statusMessage, 0, Math.min(statusMessage.length(), left)).append("…");
-                }
-            }
+            text.append("\n\n").append(statusMessage);
         }
 
         InlineKeyboardButton toggle = enabled
@@ -2211,7 +2309,14 @@ public class ShopifyBot extends TelegramLongPollingBot {
                         button("📅 Установить дату цикла", CB_DISCOUNTS_SET_DATE),
                         button("🔁 Сбросить цикл", CB_DISCOUNTS_RESET)
                 ),
-                List.of(button("🏷 Скидка на товар", CB_MANUAL_DISCOUNT)),
+                List.of(
+                        button("🚫 Исключить товар", CB_DISCOUNT_EXCLUDE),
+                        button("🏷 Своя скидка", CB_DISCOUNT_CUSTOM)
+                ),
+                List.of(
+                        button("📋 Исключенные товары", CB_DISCOUNT_EXCLUDED_LIST),
+                        button("💸 Ручная цена", CB_MANUAL_DISCOUNT)
+                ),
                 List.of(button("⬅ Назад в меню", CB_MENU))
         ));
     }
@@ -2283,10 +2388,13 @@ public class ShopifyBot extends TelegramLongPollingBot {
         return "последняя неделя: все по 350";
     }
 
-    private String buildDiscountGroupSummary(List<ProductCard> cards, LocalDate today) {
+    private String buildDiscountGroupSummary(List<ProductCard> cards, LocalDate today, Map<Long, DiscountRule> discountRules) {
         int g0 = 0, g15 = 0, g20 = 0, g30 = 0, g40 = 0, g50 = 0, g500 = 0, g350 = 0, gOther = 0;
         for (ProductCard card : cards) {
-            DiscountTarget target = calculateDiscountTarget(card, today);
+            if (discountRules.containsKey(card.productId)) {
+                continue;
+            }
+            DiscountTarget target = calculateDiscountTarget(card, today, null);
             if (target == null) continue;
             if (target.fixedPriceRsd != null) {
                 if (Math.abs(target.fixedPriceRsd - 500.0) < 0.01) g500++;
@@ -2300,12 +2408,93 @@ public class ShopifyBot extends TelegramLongPollingBot {
             else if (d <= 20) g20++;
             else if (d <= 30) g30++;
             else if (d <= 40) g40++;
-            else if (d <= 50) g50++;
-            else gOther++;
+                else if (d <= 50) g50++;
+                else gOther++;
         }
-        return "Группы по авто-скидкам сегодня:\n" +
+        return "Группы по авто-скидкам сегодня (без исключений):\n" +
                 "0%: " + g0 + " | 15%: " + g15 + " | 20%: " + g20 + " | 30%: " + g30 + " | 40%: " + g40 + " | 50%: " + g50 +
                 "\n500 RSD: " + g500 + " | 350 RSD: " + g350 + (gOther > 0 ? " | прочее: " + gOther : "");
+    }
+
+    private String buildDiscountRuleSummary(List<ProductCard> cards, Map<Long, DiscountRule> discountRules) {
+        int excludedWithoutDiscount = 0;
+        int customDiscounts = 0;
+        for (ProductCard card : cards) {
+            DiscountRule rule = discountRules.get(card.productId);
+            if (rule == null) {
+                continue;
+            }
+            if (rule.isCustomDiscount()) {
+                customDiscounts++;
+            } else {
+                excludedWithoutDiscount++;
+            }
+        }
+        return "Исключения из авто-системы:\n" +
+                "Без авто-скидки: " + excludedWithoutDiscount + " | Со своей скидкой: " + customDiscounts;
+    }
+
+    private void sendExcludedDiscountsPage(long chatId, int page) {
+        int pageSize = Math.max(1, config.listPageSize);
+        List<ProductCard> cards = db.listVisibleProducts(5000, 0);
+        Map<Long, DiscountRule> discountRules = db.listDiscountRulesByProductId();
+        List<DiscountRuleEntry> entries = new ArrayList<>();
+        for (ProductCard card : cards) {
+            DiscountRule rule = discountRules.get(card.productId);
+            if (rule != null) {
+                entries.add(new DiscountRuleEntry(card, rule));
+            }
+        }
+
+        int total = entries.size();
+        int pages = Math.max(1, (int) Math.ceil(total / (double) pageSize));
+        int maxPage = pages - 1;
+        int safePage = Math.max(0, Math.min(page, maxPage));
+        int fromIndex = Math.min(safePage * pageSize, total);
+        int toIndex = Math.min(fromIndex + pageSize, total);
+        List<DiscountRuleEntry> pageItems = entries.subList(fromIndex, toIndex);
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("📋 Исключенные товары\n");
+        sb.append("Всего: ").append(total).append("\n");
+        sb.append("Страница ").append(safePage + 1).append("/").append(pages).append("\n");
+        sb.append("В списке показаны товары, которые не участвуют в авто-скидках.\n");
+
+        if (pageItems.isEmpty()) {
+            sb.append("\nСписок пуст.");
+        } else {
+            boolean articleEnabled = isArticleEnabled();
+            for (int i = 0; i < pageItems.size(); i++) {
+                DiscountRuleEntry entry = pageItems.get(i);
+                ProductCard card = entry.card;
+                DiscountRule rule = entry.rule;
+                sb.append("\n")
+                        .append(fromIndex + i + 1)
+                        .append(". ")
+                        .append(card.title)
+                        .append(" | ")
+                        .append(formatRsd(card.currentPriceRsd))
+                        .append(" RSD")
+                        .append(" | ID: ")
+                        .append(card.productId);
+                if (articleEnabled && card.article != null && !card.article.isBlank()) {
+                    sb.append(" | Artikal: ").append(card.article);
+                }
+                sb.append("\n   ");
+                if (rule.isCustomDiscount()) {
+                    sb.append("своя скидка: ").append(rule.customDiscountPercent).append("%");
+                } else {
+                    sb.append("авто-скидка отключена, текущая скидка: 0%");
+                }
+            }
+        }
+
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+        appendPaginationRows(rows, "DISCOUNT_RULES", safePage, pages);
+        rows.add(List.of(button("⬅ Назад к скидкам", CB_DISCOUNTS)));
+        InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
+        markup.setKeyboard(rows);
+        sendText(chatId, sb.toString(), markup);
     }
 
     private String describeDiscountDay(LocalDate today) {
@@ -3743,6 +3932,73 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
     }
 
+    private void beginCustomDiscountFlow(long chatId, AdminSession session, ProductCard card) {
+        session.selectedProductId = card.productId;
+        session.state = AdminState.DISCOUNT_CUSTOM_INPUT;
+        sendText(chatId,
+                "Введите свою скидку в процентах для товара:\n" + card.title +
+                        "\nТекущая цена: " + formatRsd(card.currentPriceRsd) + " RSD" +
+                        "\nПример: 15 или 30%",
+                inlineSingleColumn(
+                        button("Отменить", CB_CANCEL_FLOW)
+                ));
+    }
+
+    private void applyDiscountExclusion(long chatId, AdminSession session, ProductCard card) {
+        if (card == null || (!"ACTIVE".equals(card.status) && !"RESERVED".equals(card.status))) {
+            sendText(chatId, "⚠️ Товар не найден среди активных.");
+            return;
+        }
+        try {
+            db.upsertDiscountRule(card.productId, "EXCLUDED", null);
+            db.setMeta("discount:last_sync_date", "");
+            syncCardState(card, card.status, 0, null, card.basePriceRsd);
+            session.state = AdminState.DISCOUNT_EXCLUDE_SELECT;
+            session.selectedProductId = 0;
+            sendText(chatId,
+                    "✅ Товар исключен из авто-скидок: " + card.title +
+                            "\nСкидка сброшена на 0%.");
+            sendSelectableProductsPage(chatId, session, 0);
+        } catch (Exception e) {
+            log.warn("Failed to exclude product {} from automatic discounts", card.productId, e);
+            sendText(chatId, "❌ Не удалось исключить товар из авто-скидок: " + e.getMessage());
+        }
+    }
+
+    private void applyCustomDiscount(long chatId, AdminSession session, int customDiscountPercent) {
+        ProductCard card = db.findProductCardById(session.selectedProductId);
+        if (card == null || (!"ACTIVE".equals(card.status) && !"RESERVED".equals(card.status))) {
+            resetSession(session);
+            sendDiscountsDashboard(chatId, "⚠️ Товар для своей скидки не найден среди активных. Попробуйте снова.");
+            return;
+        }
+        try {
+            int safeDiscountPercent = clampDiscountPercent(customDiscountPercent);
+            if (safeDiscountPercent <= 0) {
+                db.upsertDiscountRule(card.productId, "EXCLUDED", null);
+                syncCardState(card, card.status, 0, null, card.basePriceRsd);
+                sendText(chatId,
+                        "✅ Для товара отключена авто-скидка: " + card.title +
+                                "\nТекущая скидка: 0%.");
+            } else {
+                double newPrice = Math.max(1, Math.round(card.basePriceRsd * (100.0 - safeDiscountPercent) / 100.0));
+                db.upsertDiscountRule(card.productId, "CUSTOM", safeDiscountPercent);
+                syncCardState(card, card.status, safeDiscountPercent, null, newPrice);
+                sendText(chatId,
+                        "✅ Задана своя скидка: " + card.title +
+                                "\nСкидка: " + safeDiscountPercent + "%" +
+                                "\nНовая цена: " + formatRsd(newPrice) + " RSD");
+            }
+            db.setMeta("discount:last_sync_date", "");
+            session.state = AdminState.DISCOUNT_CUSTOM_SELECT;
+            session.selectedProductId = 0;
+            sendSelectableProductsPage(chatId, session, 0);
+        } catch (Exception e) {
+            log.warn("Failed to apply custom discount for product {}", card.productId, e);
+            sendText(chatId, "❌ Не удалось задать свою скидку: " + e.getMessage());
+        }
+    }
+
     private void applyDiscountCycleStartDate(long chatId, AdminSession session, String rawText) {
         String value = rawText == null ? "" : rawText.trim();
         LocalDate parsed = null;
@@ -3792,7 +4048,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
         String syncMarker = buildDiscountSyncMarker(today);
         String lastDate = db.getMeta(key);
         List<ProductCard> cards = db.listProductsForDiscount();
-        if (syncMarker.equals(lastDate) && !hasDiscountDrift(cards, today)) {
+        Map<Long, DiscountRule> discountRules = db.listDiscountRulesByProductId();
+        if (syncMarker.equals(lastDate) && !hasDiscountDrift(cards, today, discountRules)) {
             return;
         }
         if (cards.isEmpty()) {
@@ -3804,7 +4061,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         boolean transientFailure = false;
         for (ProductCard card : cards) {
             try {
-                DiscountTarget target = calculateDiscountTarget(card, today);
+                DiscountTarget target = calculateDiscountTarget(card, today, discountRules.get(card.productId));
                 if (target == null) continue;
                 if (!requiresDiscountSync(card, target)) {
                     continue;
@@ -3839,9 +4096,9 @@ public class ShopifyBot extends TelegramLongPollingBot {
         db.setMeta(key, syncMarker);
     }
 
-    private boolean hasDiscountDrift(List<ProductCard> cards, LocalDate today) {
+    private boolean hasDiscountDrift(List<ProductCard> cards, LocalDate today, Map<Long, DiscountRule> discountRules) {
         for (ProductCard card : cards) {
-            DiscountTarget target = calculateDiscountTarget(card, today);
+            DiscountTarget target = calculateDiscountTarget(card, today, discountRules.get(card.productId));
             if (target != null && requiresDiscountSync(card, target)) {
                 return true;
             }
@@ -3850,7 +4107,20 @@ public class ShopifyBot extends TelegramLongPollingBot {
     }
 
     private DiscountTarget calculateDiscountTarget(ProductCard card, LocalDate today) {
+        return calculateDiscountTarget(card, today, null);
+    }
+
+    private DiscountTarget calculateDiscountTarget(ProductCard card, LocalDate today, DiscountRule discountRule) {
         if (card.basePriceRsd <= 0) return null;
+
+        if (discountRule != null) {
+            if (discountRule.isCustomDiscount()) {
+                int customDiscountPercent = clampDiscountPercent(discountRule.customDiscountPercent);
+                double customPrice = Math.max(1, Math.round(card.basePriceRsd * (100.0 - customDiscountPercent) / 100.0));
+                return new DiscountTarget(customDiscountPercent, customPrice, null);
+            }
+            return new DiscountTarget(0, card.basePriceRsd, null);
+        }
 
         if (card.fixedPriceRsd != null && card.fixedPriceRsd <= 350.0) {
             return new DiscountTarget(discountPercentByFixed(card.basePriceRsd, 350.0), 350.0, 350.0);
@@ -3908,6 +4178,32 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private int discountPercentByFixed(double basePrice, double fixedPrice) {
         if (basePrice <= 0) return 0;
         return Math.max(0, (int) Math.round((1.0 - (fixedPrice / basePrice)) * 100.0));
+    }
+
+    private Integer parseDiscountPercentInput(String rawText) {
+        if (rawText == null) {
+            return null;
+        }
+        String normalized = rawText.trim().replace("%", "").replace(",", ".").trim();
+        if (normalized.isBlank()) {
+            return null;
+        }
+        try {
+            double parsed = Double.parseDouble(normalized);
+            if (parsed < 0 || parsed > 99) {
+                return null;
+            }
+            return (int) Math.round(parsed);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private int clampDiscountPercent(Integer value) {
+        if (value == null) {
+            return 0;
+        }
+        return Math.max(0, Math.min(99, value));
     }
 
     private int evolveFinalWeekDiscount(int baseDiscount, int dayOfWeek) {
@@ -4069,6 +4365,9 @@ public class ShopifyBot extends TelegramLongPollingBot {
         RESERVE_SELECT,
         UNRESERVE_SELECT,
         SOLD_SELECT,
+        DISCOUNT_EXCLUDE_SELECT,
+        DISCOUNT_CUSTOM_SELECT,
+        DISCOUNT_CUSTOM_INPUT,
         EDIT_SELECT,
         MANUAL_DISCOUNT_SELECT,
         MANUAL_DISCOUNT_INPUT,
@@ -4080,6 +4379,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
         RESERVE,
         UNRESERVE,
         SOLD,
+        DISCOUNT_EXCLUDE,
+        DISCOUNT_CUSTOM,
         MANUAL,
         EDIT
     }
@@ -4100,6 +4401,16 @@ public class ShopifyBot extends TelegramLongPollingBot {
         DraftData draft;
         long userId;
         volatile boolean aiProcessing;
+    }
+
+    private static class DiscountRuleEntry {
+        final ProductCard card;
+        final DiscountRule rule;
+
+        DiscountRuleEntry(ProductCard card, DiscountRule rule) {
+            this.card = card;
+            this.rule = rule;
+        }
     }
 
     private static class DraftData {
@@ -5051,7 +5362,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 return;
             }
             if (session.state == AdminState.UNRESERVE_SELECT) {
-                DiscountTarget target = calculateDiscountTarget(card, todayInDiscountZone());
+                DiscountRule discountRule = db.findDiscountRule(card.productId);
+                DiscountTarget target = calculateDiscountTarget(card, todayInDiscountZone(), discountRule);
                 if (target == null) {
                     syncCardState(card, "ACTIVE", card.discountPercent, card.fixedPriceRsd, card.currentPriceRsd);
                 } else {
@@ -5063,6 +5375,14 @@ public class ShopifyBot extends TelegramLongPollingBot {
                         (isArticleEnabled() && card.article != null && !card.article.isBlank() ? " (Artikal: " + card.article + ")" : "") +
                         "\nАктуальная цена: " + finalPrice + " RSD");
                 sendSelectableProductsPage(chatId, session, 0);
+                return;
+            }
+            if (session.state == AdminState.DISCOUNT_EXCLUDE_SELECT) {
+                applyDiscountExclusion(chatId, session, card);
+                return;
+            }
+            if (session.state == AdminState.DISCOUNT_CUSTOM_SELECT) {
+                beginCustomDiscountFlow(chatId, session, card);
                 return;
             }
             if (session.state == AdminState.SOLD_SELECT) {

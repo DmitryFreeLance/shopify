@@ -104,6 +104,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private static final String CB_DISCOUNT_EXCLUDE = "DISCOUNT:EXCLUDE";
     private static final String CB_DISCOUNT_CUSTOM = "DISCOUNT:CUSTOM";
     private static final String CB_DISCOUNT_EXCLUDED_LIST = "DISCOUNT:EXCLUDED_LIST";
+    private static final String CB_DISCOUNT_GLOBAL = "DISCOUNT:GLOBAL";
     private static final String CB_MANUAL_DISCOUNT = "OPEN:MANUAL_DISCOUNT";
     private static final String CB_DONE_PHOTOS = "FLOW:DONE_PHOTOS";
     private static final String CB_BACK_TO_PHOTOS = "FLOW:BACK_TO_PHOTOS";
@@ -148,6 +149,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private final ExecutorService workers = Executors.newFixedThreadPool(2);
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
     private final AtomicBoolean discountDisableResetRunning = new AtomicBoolean(false);
+    private final AtomicBoolean globalDiscountApplyRunning = new AtomicBoolean(false);
     private final AtomicBoolean discountSyncRunning = new AtomicBoolean(false);
     private final AtomicBoolean discountSyncRetryScheduled = new AtomicBoolean(false);
     private final Map<Long, AdminSession> sessions = new ConcurrentHashMap<>();
@@ -441,6 +443,19 @@ public class ShopifyBot extends TelegramLongPollingBot {
             resetSession(session);
             session.state = AdminState.DISCOUNT_CUSTOM_SELECT;
             sendSelectableProductsPage(chatId, session, 0);
+            answerCallback(callback, "");
+            return;
+        }
+        if (CB_DISCOUNT_GLOBAL.equals(data)) {
+            resetSession(session);
+            session.state = AdminState.DISCOUNT_GLOBAL_INPUT;
+            sendText(chatId,
+                    "Введите общую скидку в процентах для всех товаров без текущей скидки.\n" +
+                            "Индивидуальные правила и уже уцененные товары будут пропущены.\n" +
+                            "Пример: 10 или 15%",
+                    inlineSingleColumn(
+                            button("Отменить", CB_CANCEL_FLOW)
+                    ));
             answerCallback(callback, "");
             return;
         }
@@ -1015,6 +1030,20 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 return;
             }
             applyCustomDiscount(chatId, session, customDiscountPercent);
+            return;
+        }
+
+        if (session.state == AdminState.DISCOUNT_GLOBAL_INPUT) {
+            Integer globalDiscountPercent = parseDiscountPercentInput(text);
+            if (globalDiscountPercent == null || globalDiscountPercent <= 0) {
+                sendText(chatId,
+                        "Введите общую скидку в процентах, например: 10 или 15%",
+                        inlineSingleColumn(
+                                button("Отменить", CB_CANCEL_FLOW)
+                        ));
+                return;
+            }
+            applyGlobalDiscount(chatId, session, globalDiscountPercent);
             return;
         }
 
@@ -2411,10 +2440,13 @@ public class ShopifyBot extends TelegramLongPollingBot {
                         button("🏷 Своя скидка", CB_DISCOUNT_CUSTOM)
                 ),
                 List.of(
-                        button("📋 Исключенные товары", CB_DISCOUNT_EXCLUDED_LIST),
+                        button("🌐 Общая скидка", CB_DISCOUNT_GLOBAL),
                         button("💸 Ручная цена", CB_MANUAL_DISCOUNT)
                 ),
-                List.of(button("⬅ Назад в меню", CB_MENU))
+                List.of(
+                        button("📋 Исключенные товары", CB_DISCOUNT_EXCLUDED_LIST),
+                        button("⬅ Назад в меню", CB_MENU)
+                )
         ));
     }
 
@@ -4108,6 +4140,27 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
     }
 
+    private void applyGlobalDiscount(long chatId, AdminSession session, int globalDiscountPercent) {
+        int safeDiscountPercent = clampDiscountPercent(globalDiscountPercent);
+        if (safeDiscountPercent <= 0) {
+            sendText(chatId,
+                    "Введите общую скидку больше 0%.",
+                    inlineSingleColumn(
+                            button("Отменить", CB_CANCEL_FLOW)
+                    ));
+            return;
+        }
+        resetSession(session);
+        boolean started = triggerGlobalDiscountApply(chatId, safeDiscountPercent);
+        if (started) {
+            sendDiscountsDashboard(chatId,
+                    "🌐 Запущена общая скидка " + safeDiscountPercent + "% для товаров без текущей скидки.\n" +
+                            "Обновление идет в фоне, товары с индивидуальными правилами и уже уцененные позиции будут пропущены.");
+        } else {
+            sendDiscountsDashboard(chatId, "⏳ Массовая скидка уже применяется. Дождитесь завершения.");
+        }
+    }
+
     private void applyDiscountCycleStartDate(long chatId, AdminSession session, String rawText) {
         String value = rawText == null ? "" : rawText.trim();
         LocalDate parsed = null;
@@ -4171,6 +4224,29 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
     }
 
+    private boolean triggerGlobalDiscountApply(long chatId, int discountPercent) {
+        if (!globalDiscountApplyRunning.compareAndSet(false, true)) {
+            return false;
+        }
+        try {
+            workers.submit(() -> {
+                try {
+                    applyGlobalDiscountToEligibleProducts(discountPercent);
+                } finally {
+                    globalDiscountApplyRunning.set(false);
+                }
+            });
+            return true;
+        } catch (Exception e) {
+            globalDiscountApplyRunning.set(false);
+            log.warn("Failed to start global discount apply", e);
+            if (chatId > 0) {
+                sendText(chatId, "❌ Не удалось запустить общую скидку: " + e.getMessage());
+            }
+            return false;
+        }
+    }
+
     private void resetAllDiscountedProductsToBase() {
         List<ProductCard> cards = db.listVisibleProductsForDiscountReset();
         int restored = 0;
@@ -4218,6 +4294,98 @@ public class ShopifyBot extends TelegramLongPollingBot {
         if (hasPendingDiscountDisableReset()) {
             scheduleDiscountDisableResetRetrySoon(30, "discount-disable-reset-pending");
         }
+    }
+
+    private void applyGlobalDiscountToEligibleProducts(int discountPercent) {
+        List<ProductCard> cards = db.listVisibleProductsForDiscountReset();
+        Map<Long, DiscountRule> discountRules = db.listDiscountRulesByProductId();
+        LocalDate today = todayInDiscountZone();
+        boolean autoEnabled = isDiscountsEnabled();
+        boolean rateLimited = false;
+        long retryAfterSeconds = 0;
+        int updated = 0;
+        int skipped = 0;
+        int failed = 0;
+
+        for (ProductCard card : cards) {
+            try {
+                if (!isEligibleForGlobalDiscount(card, discountRules.get(card.productId), today, autoEnabled)) {
+                    skipped++;
+                    continue;
+                }
+                double newPrice = Math.max(1, Math.round(card.basePriceRsd * (100.0 - discountPercent) / 100.0));
+                syncCardState(card, card.status, discountPercent, null, newPrice);
+                updated++;
+                sleepQuietly(Math.max(config.productSyncDelayMs, 1200));
+            } catch (RateLimitException e) {
+                failed++;
+                rateLimited = true;
+                retryAfterSeconds = Math.max(retryAfterSeconds, e.getRetryAfterSeconds());
+                recordShopifyReadCooldown(e.getRetryAfterSeconds(), "global-discount-apply");
+                log.warn("Rate limited while applying global discount to product {}", card.productId, e);
+                break;
+            } catch (Exception e) {
+                failed++;
+                log.warn("Failed to apply global discount to product {}", card.productId, e);
+            }
+        }
+
+        log.info("Global discount apply pass finished. discountPercent={}, updated={}, skipped={}, failed={}, rateLimited={}",
+                discountPercent, updated, skipped, failed, rateLimited);
+
+        if (rateLimited || hasPendingGlobalDiscount(discountPercent, today, autoEnabled)) {
+            scheduleGlobalDiscountRetrySoon(
+                    rateLimited ? Math.max(10, retryAfterSeconds) : 30,
+                    discountPercent,
+                    rateLimited ? "429-during-global-discount" : "global-discount-pending"
+            );
+        }
+    }
+
+    private boolean isEligibleForGlobalDiscount(ProductCard card,
+                                                DiscountRule rule,
+                                                LocalDate today,
+                                                boolean autoEnabled) {
+        if (card == null) {
+            return false;
+        }
+        if (!"ACTIVE".equals(card.status) && !"RESERVED".equals(card.status)) {
+            return false;
+        }
+        if (rule != null) {
+            return false;
+        }
+        if (card.discountPercent > 0 || card.fixedPriceRsd != null) {
+            return false;
+        }
+        if (Math.abs(card.currentPriceRsd - card.basePriceRsd) > 0.01) {
+            return false;
+        }
+        if (autoEnabled) {
+            DiscountTarget target = calculateDiscountTarget(card, today, null);
+            if (target != null && (target.discountPercent > 0 || target.fixedPriceRsd != null)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean hasPendingGlobalDiscount(int discountPercent, LocalDate today, boolean autoEnabled) {
+        Map<Long, DiscountRule> discountRules = db.listDiscountRulesByProductId();
+        for (ProductCard card : db.listVisibleProductsForDiscountReset()) {
+            if (isEligibleForGlobalDiscount(card, discountRules.get(card.productId), today, autoEnabled)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void scheduleGlobalDiscountRetrySoon(long delaySeconds, int discountPercent, String reason) {
+        long safeDelaySeconds = Math.max(10, delaySeconds);
+        scheduler.schedule(() -> {
+            log.info("Retrying global discount apply after delay: {} ({}%)", reason, discountPercent);
+            triggerGlobalDiscountApply(0L, discountPercent);
+        }, safeDelaySeconds, TimeUnit.SECONDS);
     }
 
     private boolean hasPendingDiscountDisableReset() {
@@ -4568,6 +4736,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         DISCOUNT_EXCLUDE_SELECT,
         DISCOUNT_CUSTOM_SELECT,
         DISCOUNT_CUSTOM_INPUT,
+        DISCOUNT_GLOBAL_INPUT,
         EDIT_SELECT,
         MANUAL_DISCOUNT_SELECT,
         MANUAL_DISCOUNT_INPUT,

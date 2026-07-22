@@ -665,6 +665,10 @@ public class Database {
         return listProductsByStatuses(5000, 0, "status='ACTIVE'");
     }
 
+    public List<ProductCard> listVisibleProductsForDiscountReset() {
+        return listProductsByStatuses(10000, 0, "status IN ('ACTIVE','RESERVED')");
+    }
+
     public List<ProductCard> listTelegramCardsForSync(int limit, int offset) {
         return listProductsByStatuses(limit, offset,
                 "status IN ('ACTIVE','RESERVED') AND message_id > 0 AND channel_id IS NOT NULL AND channel_id <> ''",
@@ -1172,6 +1176,15 @@ public class Database {
             ps.executeUpdate();
         } catch (SQLException e) {
             throw new RuntimeException("DB deleteDiscountRule failed", e);
+        }
+    }
+
+    public void deleteAllDiscountRules() {
+        String sql = "DELETE FROM discount_rules";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("DB deleteAllDiscountRules failed", e);
         }
     }
 

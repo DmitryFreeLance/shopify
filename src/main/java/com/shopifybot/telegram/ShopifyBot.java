@@ -147,6 +147,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
 
     private final ExecutorService workers = Executors.newFixedThreadPool(2);
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+    private final AtomicBoolean discountDisableResetRunning = new AtomicBoolean(false);
     private final AtomicBoolean discountSyncRunning = new AtomicBoolean(false);
     private final AtomicBoolean discountSyncRetryScheduled = new AtomicBoolean(false);
     private final Map<Long, AdminSession> sessions = new ConcurrentHashMap<>();
@@ -370,8 +371,17 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
         if (CB_DISCOUNTS_DISABLE.equals(data)) {
             db.setMeta(META_DISCOUNT_ENABLED, "false");
-            sendDiscountsDashboard(chatId, "⏸ Прогрессивные скидки отключены.");
-            answerCallback(callback, "Скидки отключены");
+            db.setMeta("discount:last_sync_date", "");
+            boolean started = triggerDiscountDisableReset(chatId);
+            if (started) {
+                sendDiscountsDashboard(chatId,
+                        "⏸ Прогрессивные скидки отключены.\n" +
+                                "Возвращаю цены к базовым и убираю SNIŽENJE. Это может занять немного времени.");
+                answerCallback(callback, "Скидки отключены");
+            } else {
+                sendDiscountsDashboard(chatId, "⏳ Сброс скидок уже выполняется. Дождитесь завершения.");
+                answerCallback(callback, "Сброс уже идет");
+            }
             return;
         }
         if (CB_DISCOUNTS_ENABLE.equals(data)) {
@@ -4136,6 +4146,97 @@ public class ShopifyBot extends TelegramLongPollingBot {
         } catch (Exception e) {
             log.warn("Failed to trigger immediate discount sync: {}", reason, e);
         }
+    }
+
+    private boolean triggerDiscountDisableReset(long chatId) {
+        if (!discountDisableResetRunning.compareAndSet(false, true)) {
+            return false;
+        }
+        try {
+            workers.submit(() -> {
+                try {
+                    resetAllDiscountedProductsToBase();
+                } finally {
+                    discountDisableResetRunning.set(false);
+                }
+            });
+            return true;
+        } catch (Exception e) {
+            discountDisableResetRunning.set(false);
+            log.warn("Failed to start discount disable reset", e);
+            if (chatId > 0) {
+                sendText(chatId, "❌ Не удалось запустить сброс скидок: " + e.getMessage());
+            }
+            return false;
+        }
+    }
+
+    private void resetAllDiscountedProductsToBase() {
+        List<ProductCard> cards = db.listVisibleProductsForDiscountReset();
+        int restored = 0;
+        int skipped = 0;
+        int failed = 0;
+        boolean rateLimited = false;
+        long retryAfterSeconds = 0;
+
+        db.deleteAllDiscountRules();
+
+        for (ProductCard card : cards) {
+            boolean hasDiscount = card.discountPercent > 0
+                    || card.fixedPriceRsd != null
+                    || Math.abs(card.currentPriceRsd - card.basePriceRsd) > 0.01;
+            if (!hasDiscount) {
+                skipped++;
+                continue;
+            }
+            try {
+                boolean syncSaleCollection = card.discountPercent > 0 || card.fixedPriceRsd != null;
+                syncCardState(card, card.status, 0, null, card.basePriceRsd, syncSaleCollection);
+                restored++;
+                sleepQuietly(Math.max(config.productSyncDelayMs, 1200));
+            } catch (RateLimitException e) {
+                failed++;
+                rateLimited = true;
+                retryAfterSeconds = Math.max(retryAfterSeconds, e.getRetryAfterSeconds());
+                recordShopifyReadCooldown(e.getRetryAfterSeconds(), "discount-disable-reset");
+                log.warn("Rate limited while resetting discount for product {}", card.productId, e);
+                break;
+            } catch (Exception e) {
+                failed++;
+                log.warn("Failed to restore base price for product {}", card.productId, e);
+            }
+        }
+        log.info("Discount disable reset pass finished. restored={}, skipped={}, failed={}, rateLimited={}",
+                restored, skipped, failed, rateLimited);
+
+        if (rateLimited) {
+            scheduleDiscountDisableResetRetrySoon(retryAfterSeconds > 0 ? retryAfterSeconds : config.shopifyRateLimitCooldownSeconds,
+                    "429-during-discount-disable-reset");
+            return;
+        }
+
+        if (hasPendingDiscountDisableReset()) {
+            scheduleDiscountDisableResetRetrySoon(30, "discount-disable-reset-pending");
+        }
+    }
+
+    private boolean hasPendingDiscountDisableReset() {
+        for (ProductCard card : db.listVisibleProductsForDiscountReset()) {
+            if (card.discountPercent > 0
+                    || card.fixedPriceRsd != null
+                    || Math.abs(card.currentPriceRsd - card.basePriceRsd) > 0.01) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void scheduleDiscountDisableResetRetrySoon(long delaySeconds, String reason) {
+        long safeDelaySeconds = Math.max(10, delaySeconds);
+        scheduler.schedule(() -> {
+            log.info("Retrying discount disable reset after delay: {}", reason);
+            triggerDiscountDisableReset(0L);
+        }, safeDelaySeconds, TimeUnit.SECONDS);
     }
 
     private void syncDiscounts() {

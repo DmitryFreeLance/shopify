@@ -11,6 +11,12 @@ public class PromptBuilder {
         if (explicitSectionHint != null && !explicitSectionHint.isBlank()) {
             sb.append("Text hints section: ").append(explicitSectionHint).append(". Respect explicit section hints if present.\n");
         }
+        sb.append("Price extraction rules are strict:\n");
+        sb.append("1. If any image contains a price tag with the text 'RSD', the RSD price must be taken from the number printed immediately above, next to, or otherwise directly attached to 'RSD'.\n");
+        sb.append("2. Mentally rotate the photo if needed and read the price tag correctly before extracting the price.\n");
+        sb.append("3. Barcode digits, SKU/article digits, and any long number near a barcode are never the price, even if they visually resemble a price.\n");
+        sb.append("4. If both a barcode/article number and a smaller number near 'RSD' exist on the same tag, always choose the number tied to 'RSD'.\n");
+        sb.append("5. For Serbian listings, prefer the hanging/tag price in RSD over any other numeric text in the photos.\n");
         sb.append("Return JSON with this shape:\n");
         sb.append("{\n");
         sb.append("  \"title\": string,\n");

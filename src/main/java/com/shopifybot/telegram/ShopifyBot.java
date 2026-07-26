@@ -85,6 +85,12 @@ public class ShopifyBot extends TelegramLongPollingBot {
     private static final String CB_ADD_PRODUCT_OLD = "OPEN:ADD_PRODUCT_OLD";
     private static final String CB_ADD_PRODUCT_AI = "OPEN:ADD_PRODUCT_AI";
     private static final String CB_WITHOUT_PHOTO = "OPEN:WITHOUT_PHOTO";
+    private static final String CB_ADD_PRODUCT_OLD_SINGLE = "OPEN:ADD_PRODUCT_OLD:SINGLE";
+    private static final String CB_ADD_PRODUCT_OLD_ALBUM = "OPEN:ADD_PRODUCT_OLD:ALBUM";
+    private static final String CB_ADD_PRODUCT_AI_SINGLE = "OPEN:ADD_PRODUCT_AI:SINGLE";
+    private static final String CB_ADD_PRODUCT_AI_ALBUM = "OPEN:ADD_PRODUCT_AI:ALBUM";
+    private static final String CB_WITHOUT_PHOTO_SINGLE = "OPEN:WITHOUT_PHOTO:SINGLE";
+    private static final String CB_WITHOUT_PHOTO_ALBUM = "OPEN:WITHOUT_PHOTO:ALBUM";
     private static final String CB_SCHEDULED_POSTS = "OPEN:SCHEDULED_POSTS";
     private static final String CB_SCHEDULE_PLAN = "OPEN:SCHEDULE_PLAN";
     private static final String CB_SLOT_ADD = "SLOT:ADD";
@@ -283,20 +289,65 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
         if (CB_ADD_PRODUCT_OLD.equals(data)) {
             resetSession(session);
-            session.state = AdminState.ADD_PRODUCT_PHOTOS;
-            sendPhotoUploadPrompt(chatId, session.pendingPhotoFileIds.size());
+            sendPhotoGroupingMenu(chatId, "обычного добавления", CB_ADD_PRODUCT_OLD_SINGLE, CB_ADD_PRODUCT_OLD_ALBUM);
             answerCallback(callback, "");
             return;
         }
         if (CB_ADD_PRODUCT_AI.equals(data)) {
             resetSession(session);
-            session.state = AdminState.AI_DRAFT_PHOTOS;
-            sendAiPhotoPrompt(chatId, session, false);
+            sendPhotoGroupingMenu(chatId, "добавления по фото через ИИ", CB_ADD_PRODUCT_AI_SINGLE, CB_ADD_PRODUCT_AI_ALBUM);
             answerCallback(callback, "");
             return;
         }
         if (CB_WITHOUT_PHOTO.equals(data)) {
             resetSession(session);
+            sendPhotoGroupingMenu(chatId, "режима «Без фото»", CB_WITHOUT_PHOTO_SINGLE, CB_WITHOUT_PHOTO_ALBUM);
+            answerCallback(callback, "");
+            return;
+        }
+        if (CB_ADD_PRODUCT_OLD_SINGLE.equals(data)) {
+            resetSession(session);
+            session.photoGroupingMode = PhotoGroupingMode.SINGLE_PHOTO_PER_PRODUCT;
+            session.state = AdminState.ADD_PRODUCT_PHOTOS;
+            sendPhotoUploadPrompt(chatId, session);
+            answerCallback(callback, "");
+            return;
+        }
+        if (CB_ADD_PRODUCT_OLD_ALBUM.equals(data)) {
+            resetSession(session);
+            session.photoGroupingMode = PhotoGroupingMode.ALBUM_PER_PRODUCT;
+            session.state = AdminState.ADD_PRODUCT_PHOTOS;
+            sendPhotoUploadPrompt(chatId, session);
+            answerCallback(callback, "");
+            return;
+        }
+        if (CB_ADD_PRODUCT_AI_SINGLE.equals(data)) {
+            resetSession(session);
+            session.photoGroupingMode = PhotoGroupingMode.SINGLE_PHOTO_PER_PRODUCT;
+            session.state = AdminState.AI_DRAFT_PHOTOS;
+            sendAiPhotoPrompt(chatId, session, false);
+            answerCallback(callback, "");
+            return;
+        }
+        if (CB_ADD_PRODUCT_AI_ALBUM.equals(data)) {
+            resetSession(session);
+            session.photoGroupingMode = PhotoGroupingMode.ALBUM_PER_PRODUCT;
+            session.state = AdminState.AI_DRAFT_PHOTOS;
+            sendAiPhotoPrompt(chatId, session, false);
+            answerCallback(callback, "");
+            return;
+        }
+        if (CB_WITHOUT_PHOTO_SINGLE.equals(data)) {
+            resetSession(session);
+            session.photoGroupingMode = PhotoGroupingMode.SINGLE_PHOTO_PER_PRODUCT;
+            session.state = AdminState.WITHOUT_PHOTO_PHOTOS;
+            sendAiPhotoPrompt(chatId, session, true);
+            answerCallback(callback, "");
+            return;
+        }
+        if (CB_WITHOUT_PHOTO_ALBUM.equals(data)) {
+            resetSession(session);
+            session.photoGroupingMode = PhotoGroupingMode.ALBUM_PER_PRODUCT;
             session.state = AdminState.WITHOUT_PHOTO_PHOTOS;
             sendAiPhotoPrompt(chatId, session, true);
             answerCallback(callback, "");
@@ -614,7 +665,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 return;
             }
             if (session.pendingPhotoFileIds.isEmpty()) {
-                sendPhotoUploadPrompt(chatId, 0);
+                sendPhotoUploadPrompt(chatId, session);
                 answerCallback(callback, "Сначала добавьте хотя бы одно фото");
                 return;
             }
@@ -633,7 +684,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 sendAiPhotoPrompt(chatId, session, session.state == AdminState.WITHOUT_PHOTO_PHOTOS);
             } else {
                 session.state = AdminState.ADD_PRODUCT_PHOTOS;
-                sendPhotoUploadPrompt(chatId, session.pendingPhotoFileIds.size());
+                sendPhotoUploadPrompt(chatId, session);
             }
             answerCallback(callback, "");
             return;
@@ -875,25 +926,39 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 return;
             }
             if (message.getPhoto() != null && !message.getPhoto().isEmpty()) {
-                if (!aiBatchMode && session.pendingPhotoFileIds.size() >= 9) {
-                    sendPhotoUploadPrompt(chatId, session.pendingPhotoFileIds.size());
+                if (!aiBatchMode
+                        && session.photoGroupingMode == PhotoGroupingMode.SINGLE_PHOTO_PER_PRODUCT
+                        && !session.pendingPhotoFileIds.isEmpty()) {
+                    sendText(chatId,
+                            "ℹ️ В этом режиме один товар = одно фото.\nНажмите «Готово» или начните добавление заново.",
+                            inlineSingleColumn(
+                                    button("Готово", CB_DONE_PHOTOS),
+                                    button("Отменить", CB_CANCEL_FLOW)
+                            ));
+                    return;
+                }
+                if (!aiBatchMode
+                        && session.photoGroupingMode == PhotoGroupingMode.ALBUM_PER_PRODUCT
+                        && session.pendingPhotoFileIds.size() >= 9) {
+                    sendPhotoUploadPrompt(chatId, session);
                     return;
                 }
                 if (aiBatchMode) {
                     int groupSize = addPhotoToAiBatch(session, message);
                     String mgid = message.getMediaGroupId();
                     // For albums, reply only once per media group (on first item) to avoid spam.
-                    if (mgid == null || mgid.isBlank() || groupSize <= 1) {
+                    if (session.photoGroupingMode == PhotoGroupingMode.SINGLE_PHOTO_PER_PRODUCT
+                            || mgid == null || mgid.isBlank() || groupSize <= 1) {
                         sendAiPhotoPrompt(chatId, session, withoutPhoto);
                     }
                 } else {
                     PhotoSize best = selectBestPhoto(message.getPhoto());
                     session.pendingPhotoFileIds.add(best.getFileId());
-                    sendPhotoUploadPrompt(chatId, session.pendingPhotoFileIds.size());
+                    sendPhotoUploadPrompt(chatId, session);
                 }
             } else {
                 if (session.state == AdminState.ADD_PRODUCT_PHOTOS) {
-                    sendPhotoUploadPrompt(chatId, session.pendingPhotoFileIds.size());
+                    sendPhotoUploadPrompt(chatId, session);
                 } else {
                     sendAiPhotoPrompt(chatId, session, withoutPhoto);
                 }
@@ -1172,8 +1237,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         String size = normalizeSizeWithGender(TextParser.extractSize(rawDescription), rawDescription);
 
         if (session.pendingPhotoFileIds.isEmpty()) {
-            resetSession(session);
-            sendPhotoUploadPrompt(chatId, 0);
+            sendPhotoUploadPrompt(chatId, session);
             return;
         }
         List<String> photoFileIds = new ArrayList<>(session.pendingPhotoFileIds);
@@ -1410,7 +1474,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         String size = normalizeSizeWithGender(TextParser.extractSize(rawDescription), rawDescription);
 
         if (session.pendingPhotoFileIds.isEmpty()) {
-            sendPhotoUploadPrompt(chatId, 0);
+            sendPhotoUploadPrompt(chatId, session);
             return null;
         }
 
@@ -2659,18 +2723,36 @@ public class ShopifyBot extends TelegramLongPollingBot {
         return dow + ", день месяца " + today.getDayOfMonth();
     }
 
-    private void sendPhotoUploadPrompt(long chatId, int photoCount) {
-        String text = "📸 Добавление товара\n\n" +
-                "Загрузите до 9 фото.\n" +
-                "Принято: " + photoCount + "/9.";
-        if (photoCount <= 0) {
-            text += "\n\nОтправьте первое фото, после этого появится кнопка «Готово».";
-            sendText(chatId, text, inlineSingleColumn(
-                    button("Отменить", CB_CANCEL_FLOW)
-            ));
-            return;
+    private void sendPhotoUploadPrompt(long chatId, AdminSession session) {
+        int photoCount = session.pendingPhotoFileIds.size();
+        String text;
+        if (session.photoGroupingMode == PhotoGroupingMode.SINGLE_PHOTO_PER_PRODUCT) {
+            text = "📸 Добавление товара\n\n" +
+                    "Режим: 1 фото = 1 товар.\n" +
+                    "Загрузите одно фото товара.\n" +
+                    "Принято: " + photoCount + "/1.";
+            if (photoCount <= 0) {
+                text += "\n\nОтправьте фото, после этого появится кнопка «Готово».";
+                sendText(chatId, text, inlineSingleColumn(
+                        button("Отменить", CB_CANCEL_FLOW)
+                ));
+                return;
+            }
+            text += "\n\nФото получено. Нажмите «Готово», чтобы перейти к описанию.";
+        } else {
+            text = "📸 Добавление товара\n\n" +
+                    "Режим: альбом = 1 товар.\n" +
+                    "Загрузите до 9 фото одного товара.\n" +
+                    "Принято: " + photoCount + "/9.";
+            if (photoCount <= 0) {
+                text += "\n\nОтправьте первое фото, после этого появится кнопка «Готово».";
+                sendText(chatId, text, inlineSingleColumn(
+                        button("Отменить", CB_CANCEL_FLOW)
+                ));
+                return;
+            }
+            text += "\n\nЕсли фото достаточно, нажмите «Готово».";
         }
-        text += "\n\nЕсли фото достаточно, нажмите «Готово».";
         sendText(chatId, text, inlineSingleColumn(
                 button("Готово", CB_DONE_PHOTOS),
                 button("Отменить", CB_CANCEL_FLOW)
@@ -2688,6 +2770,19 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 ));
     }
 
+    private void sendPhotoGroupingMenu(long chatId, String flowLabel, String singleCallback, String albumCallback) {
+        sendText(chatId,
+                "Выберите, как бот должен трактовать фото для " + flowLabel + ":\n\n" +
+                        "1 фото = 1 товар\n" +
+                        "или\n" +
+                        "альбом = 1 товар",
+                inlineSingleColumn(
+                        button("1 фото = 1 товар", singleCallback),
+                        button("Альбом = 1 товар", albumCallback),
+                        button("⬅ Назад в меню", CB_MENU)
+                ));
+    }
+
     private void sendAiPhotoPrompt(long chatId, AdminSession session, boolean withoutPhotoMode) {
         int groups = session.aiPhotoGroups.size();
         int totalPhotos = 0;
@@ -2697,13 +2792,17 @@ public class ShopifyBot extends TelegramLongPollingBot {
         String text;
         if (withoutPhotoMode) {
             text = "🧾 Режим «Без фото»\n\n" +
-                    "Отправьте альбомы с фото ценников (в каждом альбоме до 9 фото).\n" +
+                    (session.photoGroupingMode == PhotoGroupingMode.SINGLE_PHOTO_PER_PRODUCT
+                            ? "Отправляйте фото ценников: каждое фото = отдельный товар.\nАльбом тоже будет разбит по одному товару на каждое фото.\n"
+                            : "Отправьте альбомы с фото ценников (в каждом альбоме до 9 фото).\nКаждый альбом = отдельный товар.\n") +
                     "Бот считает цену и артикул, затем покажет карточку для проверки.\n" +
                     "Групп товаров: " + groups + "\n" +
                     "Всего фото: " + totalPhotos + ".";
         } else {
             text = "🤖 Добавление товара по фото\n\n" +
-                    "Отправляйте альбомы фото: каждый альбом (до 9 фото) = отдельный товар.\n" +
+                    (session.photoGroupingMode == PhotoGroupingMode.SINGLE_PHOTO_PER_PRODUCT
+                            ? "Отправляйте фото: каждое фото = отдельный товар.\nАльбом тоже будет разбит по одному товару на каждое фото.\n"
+                            : "Отправляйте альбомы фото: каждый альбом (до 9 фото) = отдельный товар.\n") +
                     "Бот автоматически заполнит карточку (бренд, размер, цена" +
                     (isArticleEnabled() ? ", артикул" : "") +
                     ").\n" +
@@ -2728,12 +2827,18 @@ public class ShopifyBot extends TelegramLongPollingBot {
         if (message == null || message.getPhoto() == null || message.getPhoto().isEmpty()) {
             return 0;
         }
-        String groupKey = message.getMediaGroupId();
-        if (groupKey == null || groupKey.isBlank()) {
+        String groupKey;
+        if (session.photoGroupingMode == PhotoGroupingMode.SINGLE_PHOTO_PER_PRODUCT) {
             groupKey = "single:" + message.getMessageId();
+        } else {
+            groupKey = message.getMediaGroupId();
+            if (groupKey == null || groupKey.isBlank()) {
+                groupKey = "single:" + message.getMessageId();
+            }
         }
         List<String> group = session.aiPhotoGroups.computeIfAbsent(groupKey, k -> new ArrayList<>());
-        if (group.size() >= 9) {
+        int maxGroupSize = session.photoGroupingMode == PhotoGroupingMode.SINGLE_PHOTO_PER_PRODUCT ? 1 : 9;
+        if (group.size() >= maxGroupSize) {
             return group.size();
         }
         PhotoSize best = selectBestPhoto(message.getPhoto());
@@ -3939,6 +4044,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         session.searchScope = null;
         session.draft = null;
         session.aiProcessing = false;
+        session.photoGroupingMode = PhotoGroupingMode.ALBUM_PER_PRODUCT;
     }
 
     private void syncDiscountsSafe() {
@@ -4778,6 +4884,11 @@ public class ShopifyBot extends TelegramLongPollingBot {
         POS_ONLY
     }
 
+    private enum PhotoGroupingMode {
+        SINGLE_PHOTO_PER_PRODUCT,
+        ALBUM_PER_PRODUCT
+    }
+
     private static class AdminSession {
         AdminState state = AdminState.IDLE;
         final List<String> pendingPhotoFileIds = new ArrayList<>();
@@ -4789,6 +4900,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         DraftData draft;
         long userId;
         volatile boolean aiProcessing;
+        PhotoGroupingMode photoGroupingMode = PhotoGroupingMode.ALBUM_PER_PRODUCT;
     }
 
     private static class DiscountRuleEntry {

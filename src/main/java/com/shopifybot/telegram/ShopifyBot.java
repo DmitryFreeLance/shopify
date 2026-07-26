@@ -2850,8 +2850,13 @@ public class ShopifyBot extends TelegramLongPollingBot {
                     "  \"brand\": \"Без фото\",\n" +
                     "  \"size\": \"\",\n" +
                     "  \"price_rsd\": \"number only\"" +
-                    (articleEnabled ? ",\n  \"article\": \"8 digits or empty\"\n" : "\n") +
+                    (articleEnabled ? ",\n  \"article\": \"8 digits or empty\",\n  \"barcode_text\": \"full visible barcode digits or empty\"\n" : "\n") +
                     "}\n" +
+                    "Price rule: if the tag shows 'RSD', the price is the number printed directly above, beside, or attached to 'RSD'.\n" +
+                    "Article rule: if the visible barcode text has 10 digits, skip the first 2 digits and return the last 8 digits as article.\n" +
+                    "Never return the first 8 digits of a 10-digit barcode.\n" +
+                    "Example: barcode_text=9900000998 -> article=00000998.\n" +
+                    "If barcode_text is visible, return the full barcode digits in barcode_text.\n" +
                     "No markdown, no extra text.";
         } else {
             prompt = "Extract product card fields from photos and return only JSON:\n" +
@@ -2861,7 +2866,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                     "  \"gender\": \"ženski or muški\",\n" +
                     "  \"size\": \"must include gender prefix, e.g. 'ženski XS' or 'muški L'\",\n" +
                     "  \"price_rsd\": \"number only\"" +
-                    (articleEnabled ? ",\n  \"article\": \"8 digits or empty\"\n" : "\n") +
+                    (articleEnabled ? ",\n  \"article\": \"8 digits or empty\",\n  \"barcode_text\": \"full visible barcode digits or empty\"\n" : "\n") +
                     "}\n" +
                     "Priority rule for gender: determine gender by the color of the price tag.\n" +
                     "If the price tag is brown, use gender=muški.\n" +
@@ -2869,6 +2874,8 @@ public class ShopifyBot extends TelegramLongPollingBot {
                     "This price tag color rule has higher priority than the clothing shape or brand.\n" +
                     "Article rule: if the visible barcode text has 10 digits, ignore the first 2 digits and return the last 8 digits as article.\n" +
                     "Never return the first 8 digits of a 10-digit barcode.\n" +
+                    "Example: barcode_text=9900000998 -> article=00000998.\n" +
+                    "If barcode_text is visible, return the full barcode digits in barcode_text.\n" +
                     "Rules: if item is top/crop top/bralette/leggings/skirt/dress/bikini, use gender=ženski.\n" +
                     "No markdown, no extra text.";
         }
@@ -2889,7 +2896,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 String gender = readAiString(node, "gender", "");
                 draft.size = normalizeSizeWithGender(readAiString(node, "size", ""), draft.title + " " + itemType + " " + gender);
                 draft.priceRsd = parseAiPrice(node.path("price_rsd").asText(""));
-                draft.article = normalizeArticleCandidate(readAiString(node, "article", ""));
+                draft.article = resolveAiArticle(node);
                 if (withoutPhotoMode) {
                     draft.title = "Без фото";
                     draft.size = "";
@@ -2967,6 +2974,18 @@ public class ShopifyBot extends TelegramLongPollingBot {
         if (v == null) v = "";
         v = v.trim();
         return v.isBlank() ? fallback : v;
+    }
+
+    private String resolveAiArticle(JsonNode node) {
+        String barcodeText = readAiString(node, "barcode_text", "");
+        String article = readAiString(node, "article", "");
+
+        String decodedBarcode = normalizeArticleCandidate(barcodeText);
+        if (!decodedBarcode.isBlank()) {
+            return decodedBarcode;
+        }
+
+        return normalizeArticleCandidate(article);
     }
 
     private double parseAiPrice(String raw) {

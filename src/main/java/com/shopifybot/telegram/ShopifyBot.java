@@ -4383,16 +4383,10 @@ public class ShopifyBot extends TelegramLongPollingBot {
         db.deleteAllDiscountRules();
 
         for (ProductCard card : cards) {
-            boolean hasDiscount = card.discountPercent > 0
-                    || card.fixedPriceRsd != null
-                    || Math.abs(card.currentPriceRsd - card.basePriceRsd) > 0.01;
-            if (!hasDiscount) {
-                skipped++;
-                continue;
-            }
             try {
-                boolean syncSaleCollection = card.discountPercent > 0 || card.fixedPriceRsd != null;
-                syncCardState(card, card.status, 0, null, card.basePriceRsd, syncSaleCollection);
+                // Force a full reset for every visible product so Shopify/Telegram state
+                // is realigned even if DB pricing flags are already stale.
+                syncCardState(card, card.status, 0, null, card.basePriceRsd, true);
                 restored++;
                 sleepQuietly(Math.max(config.productSyncDelayMs, 1200));
             } catch (RateLimitException e) {

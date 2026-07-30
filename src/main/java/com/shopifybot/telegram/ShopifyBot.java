@@ -517,7 +517,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                             "Выберите, как изменить цены товаров без текущей скидки.\n" +
                             "Индивидуальные правила и уже уцененные товары будут пропущены.",
                     inlineSingleColumn(
-                            button("📊 Задать процент", CB_DISCOUNT_GLOBAL_PERCENT),
+                            button("✍️ Ввести процент или цену", CB_DISCOUNT_GLOBAL_PERCENT),
                             button("🏷 Все по 500 RSD", CB_DISCOUNT_GLOBAL_500),
                             button("🏷 Все по 350 RSD", CB_DISCOUNT_GLOBAL_350),
                             button("⬅ Назад к скидкам", CB_DISCOUNTS)
@@ -529,9 +529,11 @@ public class ShopifyBot extends TelegramLongPollingBot {
             resetSession(session);
             session.state = AdminState.DISCOUNT_GLOBAL_INPUT;
             sendText(chatId,
-                    "Введите общую скидку в процентах для всех товаров без текущей скидки.\n" +
+                    "Введите процентную скидку или конечную цену для всех товаров без текущей скидки.\n" +
                             "Индивидуальные правила и уже уцененные товары будут пропущены.\n" +
-                            "Пример: 10 или 15%",
+                            "Примеры:\n" +
+                            "• `20%` — скидка 20%\n" +
+                            "• `499` — цена 499 RSD",
                     inlineSingleColumn(
                             button("Отменить", CB_CANCEL_FLOW)
                     ));
@@ -1139,16 +1141,22 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
 
         if (session.state == AdminState.DISCOUNT_GLOBAL_INPUT) {
-            Integer globalDiscountPercent = parseDiscountPercentInput(text);
-            if (globalDiscountPercent == null || globalDiscountPercent <= 0) {
-                sendText(chatId,
-                        "Введите общую скидку в процентах, например: 10 или 15%",
-                        inlineSingleColumn(
-                                button("Отменить", CB_CANCEL_FLOW)
-                        ));
-                return;
+            if (isPercentInput(text)) {
+                Integer globalDiscountPercent = parseDiscountPercentInput(text);
+                if (globalDiscountPercent == null || globalDiscountPercent <= 0) {
+                    sendGlobalPriceInputError(chatId);
+                    return;
+                }
+                applyGlobalDiscount(chatId, session, globalDiscountPercent);
+            } else {
+                Double fixedPriceRsd = parsePriceInput(text);
+                if (fixedPriceRsd == null || fixedPriceRsd <= 0) {
+                    sendGlobalPriceInputError(chatId);
+                    return;
+                }
+                resetSession(session);
+                applyGlobalFixedPrice(chatId, fixedPriceRsd);
             }
-            applyGlobalDiscount(chatId, session, globalDiscountPercent);
             return;
         }
 
@@ -1158,16 +1166,21 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 sendDiscountsDashboard(chatId, "⚠️ Товар для скидки не выбран. Начните заново.");
                 return;
             }
-            Double newPrice = parsePriceInput(text);
-            if (newPrice == null || newPrice <= 0) {
-                sendText(chatId,
-                        "Введите новую цену числом, например: 1200",
-                        inlineSingleColumn(
-                                button("Отменить", CB_CANCEL_FLOW)
-                        ));
-                return;
+            if (isPercentInput(text)) {
+                Integer discountPercent = parseDiscountPercentInput(text);
+                if (discountPercent == null || discountPercent <= 0) {
+                    sendManualPriceInputError(chatId);
+                    return;
+                }
+                applyManualDiscountPercent(chatId, session, discountPercent);
+            } else {
+                Double newPrice = parsePriceInput(text);
+                if (newPrice == null || newPrice <= 0) {
+                    sendManualPriceInputError(chatId);
+                    return;
+                }
+                applyManualDiscount(chatId, session, newPrice);
             }
-            applyManualDiscount(chatId, session, newPrice);
             return;
         }
 
@@ -4165,6 +4178,30 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
     }
 
+    private boolean isPercentInput(String text) {
+        return text != null && text.contains("%");
+    }
+
+    private void sendGlobalPriceInputError(long chatId) {
+        sendText(chatId,
+                "Введите значение в одном из форматов:\n" +
+                        "• `20%` — процентная скидка\n" +
+                        "• `499` — конечная цена в RSD",
+                inlineSingleColumn(
+                        button("Отменить", CB_CANCEL_FLOW)
+                ));
+    }
+
+    private void sendManualPriceInputError(long chatId) {
+        sendText(chatId,
+                "Введите значение в одном из форматов:\n" +
+                        "• `20%` — процентная скидка\n" +
+                        "• `499` — конечная цена в RSD",
+                inlineSingleColumn(
+                        button("Отменить", CB_CANCEL_FLOW)
+                ));
+    }
+
     private String normalizeSizeWithGender(String rawSize, String contextText) {
         if (rawSize == null) return "";
         String value = rawSize.trim();
@@ -4256,6 +4293,31 @@ public class ShopifyBot extends TelegramLongPollingBot {
         }
     }
 
+    private void applyManualDiscountPercent(long chatId, AdminSession session, int discountPercent) {
+        ProductCard card = db.findProductCardById(session.selectedProductId);
+        if (card == null || (!"ACTIVE".equals(card.status) && !"RESERVED".equals(card.status))) {
+            resetSession(session);
+            sendDiscountsDashboard(chatId, "⚠️ Товар не найден среди активных. Попробуйте снова.");
+            return;
+        }
+        try {
+            int safeDiscountPercent = clampDiscountPercent(discountPercent);
+            double newPrice = Math.max(1, Math.round(card.basePriceRsd * (100.0 - safeDiscountPercent) / 100.0));
+            syncCardState(card, card.status, safeDiscountPercent, null, newPrice);
+            session.state = AdminState.MANUAL_DISCOUNT_SELECT;
+            session.selectedProductId = 0;
+            sendText(chatId,
+                    "✅ Скидка обновлена: " + card.title +
+                            "\nСкидка: " + safeDiscountPercent + "%" +
+                            "\nНовая цена: " + formatRsd(newPrice) + " RSD\n" +
+                            "Товар помечен как SNIŽENJE.");
+            sendSelectableProductsPage(chatId, session, 0);
+        } catch (Exception e) {
+            log.warn("Failed to apply manual percentage discount for product {}", card.productId, e);
+            sendText(chatId, "❌ Не удалось применить скидку: " + e.getMessage());
+        }
+    }
+
     private void beginCustomDiscountFlow(long chatId, AdminSession session, ProductCard card) {
         session.selectedProductId = card.productId;
         session.state = AdminState.DISCOUNT_CUSTOM_INPUT;
@@ -4272,9 +4334,11 @@ public class ShopifyBot extends TelegramLongPollingBot {
         session.selectedProductId = card.productId;
         session.state = AdminState.MANUAL_DISCOUNT_INPUT;
         sendText(chatId,
-                "Введите ручную цену для товара:\n" + card.title +
+                "Введите процентную скидку или конечную цену для товара:\n" + card.title +
                         "\nТекущая цена: " + formatRsd(card.currentPriceRsd) + " RSD" +
-                        "\nПример: 1200",
+                        "\n\nПримеры:\n" +
+                        "• `20%` — скидка 20%\n" +
+                        "• `499` — цена 499 RSD",
                 inlineSingleColumn(
                         button("Отменить", CB_CANCEL_FLOW)
                 ));

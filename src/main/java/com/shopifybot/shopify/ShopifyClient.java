@@ -16,7 +16,9 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 public class ShopifyClient {
     private static final Logger log = LoggerFactory.getLogger(ShopifyClient.class);
@@ -154,6 +156,51 @@ public class ShopifyClient {
         post(restBase() + "/collects.json", root);
     }
 
+    public Set<Long> listProductIdsInCollection(long collectionId) throws IOException {
+        Set<Long> productIds = new HashSet<>();
+        String after = null;
+        do {
+            String query = "query CollectionProducts($id: ID!, $after: String) { " +
+                    "collection(id: $id) { products(first: 250, after: $after) { " +
+                    "nodes { id } pageInfo { hasNextPage endCursor } } } }";
+            ObjectNode variables = mapper.createObjectNode();
+            variables.put("id", "gid://shopify/Collection/" + collectionId);
+            if (after == null) {
+                variables.putNull("after");
+            } else {
+                variables.put("after", after);
+            }
+            JsonNode root = graphQL(query, variables);
+            JsonNode products = root.path("data").path("collection").path("products");
+            for (JsonNode node : products.path("nodes")) {
+                long productId = parseGraphQlNumericId(node.path("id").asText(""));
+                if (productId > 0) productIds.add(productId);
+            }
+            JsonNode pageInfo = products.path("pageInfo");
+            after = pageInfo.path("hasNextPage").asBoolean(false)
+                    ? pageInfo.path("endCursor").asText(null)
+                    : null;
+        } while (after != null && !after.isBlank());
+        return productIds;
+    }
+
+    public void addProductsToCollection(long collectionId, List<Long> productIds) throws IOException {
+        if (productIds == null || productIds.isEmpty()) return;
+        String mutation = "mutation Add($id: ID!, $productIds: [ID!]!) { " +
+                "collectionAddProducts(id: $id, productIds: $productIds) { userErrors { field message } } }";
+        for (int start = 0; start < productIds.size(); start += 250) {
+            ObjectNode variables = mapper.createObjectNode();
+            variables.put("id", "gid://shopify/Collection/" + collectionId);
+            ArrayNode ids = variables.putArray("productIds");
+            for (Long productId : productIds.subList(start, Math.min(start + 250, productIds.size()))) {
+                ids.add("gid://shopify/Product/" + productId);
+            }
+            JsonNode root = graphQL(mutation, variables);
+            assertGraphQlUserErrors(root.path("data").path("collectionAddProducts").path("userErrors"),
+                    "add products to collection " + collectionId);
+        }
+    }
+
     public void deleteProduct(long productId) throws IOException {
         Request request = new Request.Builder()
                 .url(restBase() + "/products/" + productId + ".json")
@@ -161,6 +208,9 @@ public class ShopifyClient {
                 .delete()
                 .build();
         try (Response response = http.newCall(request).execute()) {
+            if (response.code() == 429) {
+                throw rateLimitException("Shopify DELETE rate limited", response);
+            }
             if (!response.isSuccessful()) {
                 throw new IOException("Shopify delete failed: " + response.code() + " " + response.message());
             }
@@ -619,10 +669,34 @@ public class ShopifyClient {
                 .post(RequestBody.create(mapper.writeValueAsBytes(root), JSON))
                 .build();
         try (Response response = http.newCall(request).execute()) {
+            if (response.code() == 429) {
+                throw rateLimitException("Shopify GraphQL rate limited", response);
+            }
             if (!response.isSuccessful()) {
                 throw new IOException("Shopify GraphQL failed: " + response.code() + " " + response.message());
             }
-            return mapper.readTree(response.body().string());
+            JsonNode result = mapper.readTree(response.body().string());
+            JsonNode errors = result.path("errors");
+            if (errors.isArray() && !errors.isEmpty()) {
+                List<String> messages = new ArrayList<>();
+                for (JsonNode error : errors) {
+                    String message = error.path("message").asText("");
+                    if (!message.isBlank()) messages.add(message);
+                }
+                throw new IOException("Shopify GraphQL errors: " + String.join("; ", messages));
+            }
+            return result;
+        }
+    }
+
+    private long parseGraphQlNumericId(String gid) {
+        if (gid == null || gid.isBlank()) return 0;
+        int slash = gid.lastIndexOf('/');
+        String raw = slash >= 0 ? gid.substring(slash + 1) : gid;
+        try {
+            return Long.parseLong(raw);
+        } catch (NumberFormatException ignored) {
+            return 0;
         }
     }
 

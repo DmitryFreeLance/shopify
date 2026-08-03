@@ -160,7 +160,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
 
     private final ExecutorService workers = Executors.newFixedThreadPool(2);
     private final ExecutorService discountWorker = Executors.newSingleThreadExecutor();
-    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+    private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(2);
     private final AtomicBoolean discountDisableResetRunning = new AtomicBoolean(false);
     private final AtomicBoolean globalDiscountApplyRunning = new AtomicBoolean(false);
     private final AtomicBoolean discountSyncRunning = new AtomicBoolean(false);
@@ -177,7 +177,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
         this.kie = new KieAiClient(http, config.kieApiKey, config.kieModel, config.kieBaseUrl, config.kieEndpointOverride);
 
         scheduler.scheduleWithFixedDelay(this::processReadyMediaGroups, 15, 15, TimeUnit.SECONDS);
-        scheduler.scheduleWithFixedDelay(this::syncDeletedProductsSafe, config.productSyncSeconds, config.productSyncSeconds, TimeUnit.SECONDS);
+        scheduler.scheduleWithFixedDelay(this::syncDeletedProductsSafe, 10, Math.max(30, config.productSyncSeconds), TimeUnit.SECONDS);
         scheduler.scheduleWithFixedDelay(this::syncShopifyBarcodesSafe, Math.max(45, config.productSyncSeconds), Math.max(45, config.productSyncSeconds), TimeUnit.SECONDS);
         scheduler.scheduleWithFixedDelay(
                 () -> triggerDiscountSyncNow("scheduled"),
@@ -191,6 +191,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
     public void initialize() {
         try {
             collections.ensureCollections();
+            scheduler.schedule(this::syncAllProductCollectionsSafe, 15, TimeUnit.SECONDS);
             discountZone = ZoneId.of(config.discountTimezone);
             shopCurrency = shopify.getShopCurrency();
             if (shopCurrency == null || shopCurrency.isBlank()) {
@@ -1218,7 +1219,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                         ));
                 return;
             }
-            ProductCard existingByArticle = db.findProductCardByArticle(article);
+            ProductCard existingByArticle = findBlockingProductByArticle(article);
             if (existingByArticle != null) {
                 sendText(chatId,
                         "⚠️ Этот артикул уже используется.\n" +
@@ -1328,7 +1329,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
             PublishResult pub = null;
             try {
                 if (finalArticleEnabled) {
-                    ProductCard existing = db.findProductCardByArticle(finalArticle);
+                    ProductCard existing = findBlockingProductByArticle(finalArticle);
                     if (existing != null) {
                         sendWelcomeMenu(chatId,
                                 "⚠️ Артикул " + finalArticle + " уже существует (" + statusLabel(existing.status) + ").\n" +
@@ -1457,7 +1458,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                         ));
                 return null;
             }
-            ProductCard existingByArticle = db.findProductCardByArticle(article);
+            ProductCard existingByArticle = findBlockingProductByArticle(article);
             if (existingByArticle != null && ("ACTIVE".equals(existingByArticle.status) || "RESERVED".equals(existingByArticle.status) || "POS_ONLY".equals(existingByArticle.status))) {
                 sendText(chatId,
                         "⚠️ Этот артикул уже используется.\n" +
@@ -1562,7 +1563,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                         ));
                 return;
             }
-            ProductCard existingByArticle = db.findProductCardByArticle(article);
+            ProductCard existingByArticle = findBlockingProductByArticle(article);
             if (existingByArticle != null && existingByArticle.productId != current.productId) {
                 sendText(chatId,
                         "⚠️ Этот артикул уже используется.\n" +
@@ -2425,6 +2426,42 @@ public class ShopifyBot extends TelegramLongPollingBot {
         log.info("Product missing in Shopify during {}, marked as PRODATO and cleaned references. productId={}", source, card.productId);
     }
 
+    private ProductCard findBlockingProductByArticle(String article) {
+        ProductCard existing = db.findProductCardByArticle(article);
+        if (existing == null || !isBlockingProductStatus(existing.status)) {
+            return null;
+        }
+        try {
+            ShopifyClient.ProductAvailability availability = shopify.getProductAvailability(existing.productId);
+            if (availability == ShopifyClient.ProductAvailability.IN_STOCK) {
+                return existing;
+            }
+            if (availability == ShopifyClient.ProductAvailability.OUT_OF_STOCK) {
+                try {
+                    shopify.deleteProduct(existing.productId);
+                } catch (Exception deleteError) {
+                    if (!isShopifyProductMissingError(deleteError)) {
+                        log.warn("Failed to delete stale out-of-stock product {} while checking article {}",
+                                existing.productId, article, deleteError);
+                        return existing;
+                    }
+                }
+            }
+            handleMissingShopifyProduct(existing, "article-reuse-check");
+            return db.findProductCardByArticle(article);
+        } catch (RateLimitException e) {
+            recordShopifyReadCooldown(e.getRetryAfterSeconds(), "article-reuse-check");
+            return existing;
+        } catch (Exception e) {
+            log.warn("Failed to verify Shopify state for article {}, keeping it reserved", article, e);
+            return existing;
+        }
+    }
+
+    private boolean isBlockingProductStatus(String status) {
+        return "ACTIVE".equals(status) || "RESERVED".equals(status) || "POS_ONLY".equals(status);
+    }
+
     private void editTelegramCaption(String channelId, long messageId, String caption) throws TelegramApiException {
         EditMessageCaption edit = new EditMessageCaption();
         edit.setChatId(channelId);
@@ -3266,7 +3303,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 sendText(chatId, "Артикул должен содержать ровно 8 цифр.");
                 return;
             }
-            ProductCard existing = db.findProductCardByArticle(article);
+            ProductCard existing = findBlockingProductByArticle(article);
             if (existing != null && ("ACTIVE".equals(existing.status) || "RESERVED".equals(existing.status) || "POS_ONLY".equals(existing.status))) {
                 sendText(chatId, "Этот артикул уже используется активным товаром.");
                 return;
@@ -3298,7 +3335,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                 sendText(chatId, "❗ Укажите артикул из 8 цифр (через «Редактировать»).");
                 return;
             }
-            ProductCard existing = db.findProductCardByArticle(article);
+            ProductCard existing = findBlockingProductByArticle(article);
             if (existing != null && ("ACTIVE".equals(existing.status) || "RESERVED".equals(existing.status) || "POS_ONLY".equals(existing.status))) {
                 sendText(chatId, "❗ Этот артикул уже используется. Укажите другой.");
                 return;
@@ -3361,7 +3398,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
             throw new IOException("Артикул должен содержать 8 цифр");
         }
         if (isArticleEnabled()) {
-            ProductCard existing = db.findProductCardByArticle(article);
+            ProductCard existing = findBlockingProductByArticle(article);
             if (existing != null && ("ACTIVE".equals(existing.status) || "RESERVED".equals(existing.status) || "POS_ONLY".equals(existing.status))) {
                 throw new IOException("Артикул уже используется");
             }
@@ -3704,26 +3741,37 @@ public class ShopifyBot extends TelegramLongPollingBot {
     }
 
     private void processScheduledPosts() {
-        while (true) {
-            List<Database.ScheduledPost> due = db.listDueScheduledPosts(Instant.now().getEpochSecond(), 20);
-            if (due.isEmpty()) {
-                return;
-            }
-            for (Database.ScheduledPost post : due) {
-                try {
-                    publishScheduledPostWithRetry(post);
-                    db.markScheduledPostDone(post.id);
-                } catch (Exception e) {
-                    String err = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
-                    db.markScheduledPostRetry(post.id, err);
-                    log.warn("Failed to publish scheduled post id={}: {}", post.id, err);
+        List<Database.ScheduledPost> due = db.listDueScheduledPosts(Instant.now().getEpochSecond(), 20);
+        for (Database.ScheduledPost post : due) {
+            try {
+                publishScheduledPostWithRetry(post);
+                db.markScheduledPostDone(post.id);
+            } catch (Exception e) {
+                String err = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+                boolean failedPermanently = isPermanentScheduledPostFailure(err) || post.retryCount >= 4;
+                if (failedPermanently) {
+                    db.markScheduledPostFailed(post.id, err);
+                    log.warn("Scheduled post id={} moved to FAILED: {}", post.id, err);
                     try {
-                        sendText(post.createdBy, "⚠️ Не удалось опубликовать отложенный пост #" + post.id + ": " + err);
+                        sendText(post.createdBy, "⚠️ Отложенный пост #" + post.id + " остановлен: " + err);
                     } catch (Exception ignored) {
                     }
+                } else {
+                    db.markScheduledPostRetry(post.id, err);
+                    log.warn("Failed to publish scheduled post id={}, retry deferred: {}", post.id, err);
                 }
             }
         }
+    }
+
+    private boolean isPermanentScheduledPostFailure(String error) {
+        if (error == null) return false;
+        String normalized = error.toLowerCase(Locale.ROOT);
+        return normalized.contains("артикул уже используется")
+                || normalized.contains("артикул должен содержать")
+                || normalized.contains("не удалось загрузить фото товара")
+                || normalized.contains("price must")
+                || normalized.contains("validation failed");
     }
 
     private void publishScheduledPostWithRetry(Database.ScheduledPost post) throws Exception {
@@ -5032,8 +5080,12 @@ public class ShopifyBot extends TelegramLongPollingBot {
         Throwable current = error;
         while (current != null) {
             String message = current.getMessage();
-            if (message != null && message.toLowerCase(Locale.ROOT).contains("shopify get failed: 404")) {
-                return true;
+            if (message != null) {
+                String normalized = message.toLowerCase(Locale.ROOT);
+                if (normalized.contains("shopify get failed: 404")
+                        || normalized.contains("shopify delete failed: 404")) {
+                    return true;
+                }
             }
             current = current.getCause();
         }
@@ -5925,24 +5977,60 @@ public class ShopifyBot extends TelegramLongPollingBot {
         return "";
     }
 
+    private void syncAllProductCollectionsSafe() {
+        try {
+            syncAllProductCollections();
+        } catch (RateLimitException e) {
+            recordShopifyReadCooldown(e.getRetryAfterSeconds(), "collection-backfill");
+            log.warn("Shopify collection backfill paused by rate limit");
+            scheduler.schedule(this::syncAllProductCollectionsSafe, 5, TimeUnit.MINUTES);
+        } catch (Exception e) {
+            log.warn("Failed to backfill Shopify product collections", e);
+            scheduler.schedule(this::syncAllProductCollectionsSafe, 5, TimeUnit.MINUTES);
+        }
+    }
+
+    private void syncAllProductCollections() throws IOException {
+        List<ProductCard> cards = db.listCardsForSync();
+        for (String section : List.of("Muško", "Žensko")) {
+            Long collectionId = collections.getCollectionId(section);
+            if (collectionId == null) {
+                log.warn("Shopify collection '{}' was not found; cannot backfill products", section);
+                continue;
+            }
+            Set<Long> existingProductIds = shopify.listProductIdsInCollection(collectionId);
+            List<Long> missingProductIds = new ArrayList<>();
+            for (ProductCard card : cards) {
+                if ("POS_ONLY".equals(card.status) || existingProductIds.contains(card.productId)) continue;
+                String categorySource = (card.description == null ? "" : card.description) + "\n"
+                        + (card.size == null ? "" : card.size);
+                CategorySelection selection = TextParser.detectExplicitCategories(categorySource);
+                boolean belongs = selection.entries.stream().anyMatch(entry -> section.equals(entry.section));
+                if (belongs) missingProductIds.add(card.productId);
+            }
+            shopify.addProductsToCollection(collectionId, missingProductIds);
+            log.info("Shopify collection backfill finished. collection={}, added={}", section, missingProductIds.size());
+        }
+    }
+
     private void syncDeletedProducts() {
         if (isShopifyReadCooldownActive()) {
             return;
         }
         boolean rateLimited = syncDeletedProductsBatch(
-                META_SHOPIFY_SYNC_OFFSET,
-                Math.max(1, config.productSyncBatchSize),
-                db.countTelegramCardsForSync(),
-                (limit, offset) -> db.listTelegramCardsForSync(limit, offset),
-                "telegram"
+                META_SHOPIFY_POS_ONLY_SYNC_OFFSET,
+                Math.max(1, config.productSyncPosOnlyBatchSize),
+                db.countPosOnlyCardsForSync(),
+                (limit, offset) -> db.listPosOnlyCardsForSync(limit, offset),
+                "pos-only"
         );
         if (!rateLimited && !isShopifyReadCooldownActive()) {
             syncDeletedProductsBatch(
-                    META_SHOPIFY_POS_ONLY_SYNC_OFFSET,
-                    Math.max(1, config.productSyncPosOnlyBatchSize),
-                    db.countPosOnlyCardsForSync(),
-                    (limit, offset) -> db.listPosOnlyCardsForSync(limit, offset),
-                    "pos-only"
+                    META_SHOPIFY_SYNC_OFFSET,
+                    Math.max(1, config.productSyncBatchSize),
+                    db.countTelegramCardsForSync(),
+                    (limit, offset) -> db.listTelegramCardsForSync(limit, offset),
+                    "telegram"
             );
         }
     }
@@ -6048,8 +6136,14 @@ public class ShopifyBot extends TelegramLongPollingBot {
                     try {
                         shopify.deleteProduct(card.productId);
                         log.info("Product {} deleted in Shopify after reaching 0 stock", card.productId);
+                    } catch (RateLimitException e) {
+                        throw e;
                     } catch (Exception e) {
-                        log.warn("Failed to delete out-of-stock product {} in Shopify", card.productId, e);
+                        if (!isShopifyProductMissingError(e)) {
+                            log.warn("Failed to delete out-of-stock product {} in Shopify; keeping it for retry", card.productId, e);
+                            nextOffset++;
+                            continue;
+                        }
                     }
                     if (!markTelegramCardAsProdato(card)) {
                         log.warn("Product {} out of stock in Shopify, but Telegram caption update failed. Will retry later.", card.productId);
@@ -6060,9 +6154,7 @@ public class ShopifyBot extends TelegramLongPollingBot {
                     db.deleteProductCard(card.productId);
                     log.info("Product out of stock in Shopify, marked as PRODATO and cleaned references. productId={}", card.productId);
                 }
-                if (config.productSyncDelayMs > 0) {
-                    Thread.sleep(config.productSyncDelayMs);
-                }
+                Thread.sleep(Math.max(500, config.productSyncDelayMs));
                 nextOffset++;
             } catch (RateLimitException e) {
                 recordShopifyReadCooldown(e.getRetryAfterSeconds(), "deleted-sync/" + label);

@@ -959,10 +959,12 @@ public class Database {
     public List<ScheduledPost> listDueScheduledPosts(long nowEpoch, int limit) {
         List<ScheduledPost> items = new ArrayList<>();
         String sql = "SELECT id, mode, payload_json, publish_at, created_by, status, retry_count, last_error, created_at, updated_at " +
-                "FROM scheduled_posts WHERE status='PENDING' AND publish_at<=? ORDER BY publish_at ASC, id ASC LIMIT ?";
+                "FROM scheduled_posts WHERE status='PENDING' AND publish_at<=? " +
+                "AND (retry_count=0 OR updated_at<=?) ORDER BY publish_at ASC, id ASC LIMIT ?";
         try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setLong(1, nowEpoch);
-            ps.setInt(2, limit);
+            ps.setLong(2, nowEpoch - 300);
+            ps.setInt(3, limit);
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     items.add(mapScheduledPost(rs));
@@ -1026,6 +1028,18 @@ public class Database {
             ps.executeUpdate();
         } catch (SQLException e) {
             throw new RuntimeException("DB markScheduledPostRetry failed", e);
+        }
+    }
+
+    public void markScheduledPostFailed(long id, String error) {
+        String sql = "UPDATE scheduled_posts SET status='FAILED', retry_count=retry_count+1, last_error=?, updated_at=? WHERE id=?";
+        try (Connection conn = connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, error);
+            ps.setLong(2, Instant.now().getEpochSecond());
+            ps.setLong(3, id);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("DB markScheduledPostFailed failed", e);
         }
     }
 

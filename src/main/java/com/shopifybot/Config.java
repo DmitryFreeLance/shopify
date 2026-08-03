@@ -76,10 +76,10 @@ public class Config {
                 .map(s -> s.toLowerCase(Locale.ROOT))
                 .collect(Collectors.toList());
         this.mediaGroupFinalizeSeconds = parseLong(getenv("MEDIA_GROUP_FINALIZE_SECONDS", "30"), 30);
-        this.productSyncSeconds = parseLong(getenv("PRODUCT_SYNC_SECONDS", "180"), 180);
+        this.productSyncSeconds = parseLong(getenv("PRODUCT_SYNC_SECONDS", "60"), 60);
         this.productSyncDelayMs = parseLong(getenv("PRODUCT_SYNC_DELAY_MS", "200"), 200);
-        this.productSyncBatchSize = (int) parseLong(getenv("PRODUCT_SYNC_BATCH_SIZE", "20"), 20);
-        this.productSyncPosOnlyBatchSize = (int) parseLong(getenv("PRODUCT_SYNC_POS_ONLY_BATCH_SIZE", "5"), 5);
+        this.productSyncBatchSize = (int) parseLong(getenv("PRODUCT_SYNC_BATCH_SIZE", "30"), 30);
+        this.productSyncPosOnlyBatchSize = (int) parseLong(getenv("PRODUCT_SYNC_POS_ONLY_BATCH_SIZE", "20"), 20);
         this.discountSyncSeconds = parseLong(getenv("DISCOUNT_SYNC_SECONDS", "3600"), 3600);
         this.discountTimezone = getenv("DISCOUNT_TIMEZONE", "Europe/Belgrade");
         this.sqlitePath = getenv("SQLITE_PATH", "./data/bot.db");

@@ -21,10 +21,13 @@ public class ShopifyCollections {
     }
 
     public void ensureCollections() throws IOException {
-        Map<String, Long> existing = new HashMap<>();
+        db.clearCollections();
         for (ShopifyClient.CustomCollection c : shopify.listAllCustomCollections()) {
-            existing.put(c.title, c.id);
             db.storeCollection(c.title, c.id, c.handle);
+            String canonical = canonicalSectionTitle(c.title);
+            if (canonical != null) {
+                db.storeCollection(canonical, c.id, c.handle);
+            }
         }
     }
 
@@ -33,9 +36,7 @@ public class ShopifyCollections {
     }
 
     public Long getCollectionId(String title) {
-        Long id = db.findCollectionId(title);
-        if (id != null) return id;
-        return null;
+        return db.findCollectionId(title);
     }
 
     public String getCollectionHandle(String title) {
@@ -73,6 +74,17 @@ public class ShopifyCollections {
 
     public List<String> listSectionTitles() {
         return Collections.unmodifiableList(sections);
+    }
+
+    private String canonicalSectionTitle(String title) {
+        if (title == null || title.isBlank()) return null;
+        String normalized = title.trim().replaceFirst("^\\d+\\s*[.)-]?\\s*", "");
+        for (String section : sections) {
+            if (section.equalsIgnoreCase(normalized)) {
+                return section;
+            }
+        }
+        return null;
     }
 
 }
